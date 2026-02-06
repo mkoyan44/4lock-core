@@ -1,10 +1,5 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 4lock-core is Linux-only
-    if !std::env::var("CARGO_CFG_TARGET_OS").map_or(false, |v| v == "linux") {
-        eprintln!("error: 4lock-core is Linux-only. Build on Linux or use 4lock-agent's cross-compilation (Docker/nerdctl).");
-        std::process::exit(1);
-    }
-    // Compile CRI protos
+    // CRI protos only needed on Linux (container runtime). Allow building lib (intent types) on all platforms for vappc client.
     #[cfg(target_os = "linux")]
     {
         tonic_build::configure()
