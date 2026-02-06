@@ -5,10 +5,19 @@ Core crates and tooling for the 4lock platform.
 - **daemon/** – Primary code: blob (registry proxy), container (OCI/CRI runtime), vappc (daemon + client). See [daemon/README.md](daemon/README.md).
 - **publish/** – Builds `vappc-linux-daemon` for Linux targets and uploads to Nexus (cargo/artifact repo). See [publish/README.md](publish/README.md).
 
-**Build** (from repo root):
+**Build** (from repo root, Linux only):
 
 ```bash
 cargo build -p daemon          # or cargo build --release -p daemon
+```
+
+**Build and run with nerdctl** (same approach as 4lock-api: Makefile + `docker/`):
+
+```bash
+cp .env.example .env   # set GH_OWNER, GH_TOKEN, TARGET_ARCH=amd64 or arm64
+make build             # nerdctl build -f docker/dockerfiles/Dockerfile.core ...
+make run               # run image (socket at /tmp/vappc)
+make all               # build + push to ghcr.io
 ```
 
 **Publish** (build Linux binaries and make data available on Nexus):

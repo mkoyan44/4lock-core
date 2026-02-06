@@ -30,6 +30,24 @@ cargo build -p vappc --release --bin vappc-linux-daemon
 
 Binary output: `target/release/vappc-linux-daemon` (or `target/debug/` for dev profile). On non-Linux hosts the build will fail with a clear message; use 4lock-agent’s build (which cross-compiles via Docker/nerdctl) to produce the daemon binary.
 
+## Build and run with nerdctl (same approach as 4lock-api)
+
+Use **Makefile** and **docker/** (same layout as 4lock-api):
+
+- **docker/dockerfiles/Dockerfile.core** – multi-stage build, `TARGET_ARCH` (arm64/amd64)
+- **docker/entrypoints/docker-entrypoint-core.sh** – entrypoint for vappc-linux-daemon
+- **Makefile** – requires `.env` (GH_OWNER, GH_TOKEN, TARGET_ARCH); targets: `build`, `push`, `run`, `all`
+
+```bash
+cp .env.example .env   # set GH_OWNER, GH_TOKEN, TARGET_ARCH=amd64 or arm64
+make build             # nerdctl build -f docker/dockerfiles/Dockerfile.core ...
+make run               # run image (mounts /tmp/vappc for socket)
+make all               # build + push to ghcr.io
+```
+
+Backward compatibility: you can still build with the root `Dockerfile` (single-arch, no .env):  
+`nerdctl build -t 4lock-core .`
+
 ## Cross (nerdctl/Docker)
 
 `Cross.toml` in this directory is used by **publish/** when building Linux binaries. Set `CROSS_CONTAINER_ENGINE=nerdctl` to use nerdctl.

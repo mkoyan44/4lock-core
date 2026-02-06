@@ -1,0 +1,49 @@
+# 4lock-core: build and run on Linux only (via nerdctl). Same approach as 4lock-api.
+# Build: make core-build (or nerdctl build -f docker/dockerfiles/Dockerfile.core --build-arg TARGET_ARCH=amd64 -t ... .)
+# Run:   nerdctl run --rm -it <image>
+
+ARG TARGET_ARCH
+
+# -----------------------------------------------------------------------------
+# Stage 1: build (Linux)
+# -----------------------------------------------------------------------------
+FROM --platform=linux/${TARGET_ARCH} rust:1-bookworm AS builder
+
+# Build deps: protobuf (CRI proto), OpenSSL, pkg-config (Cross.toml alignment)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    libssl-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy manifests first for better layer caching
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+
+# Release build for vappc-linux-daemon (Linux-only binary)
+RUN cargo build --release -p vappc --bin vappc-linux-daemon
+
+# -----------------------------------------------------------------------------
+# Stage 2: runtime (Linux only)
+# -----------------------------------------------------------------------------
+FROM --platform=linux/${TARGET_ARCH} debian:bookworm-slim
+
+# Runtime: pasta is required by daemon system check when running as root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    passt \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Daemon runs as root inside container (system_check accepts root + pasta)
+RUN mkdir -p /root/.vapp
+
+COPY --from=builder /app/target/release/vappc-linux-daemon /usr/local/bin/vappc-linux-daemon
+COPY docker/entrypoints/docker-entrypoint-core.sh /usr/local/bin/entrypoint
+RUN chmod 0755 /usr/local/bin/entrypoint
+
+# Default: Unix socket at /tmp/vappc.sock; override with --socket
+ENV RUST_LOG=info
+ENTRYPOINT ["/usr/local/bin/entrypoint"]
+CMD ["--socket", "/tmp/vappc.sock", "--app-dir", "/root/.vapp"]

@@ -1,0 +1,20 @@
+# Build output
+/target
+
+# Git
+.git
+.gitignore
+
+# Docs and packaging (not needed for build)
+/docs
+/packaging
+*.md
+!src/**/*.md
+
+# IDE and misc
+.env
+*.log
+**/*.rs.bk
+.cursor
+Dockerfile.dev
+Cross.toml

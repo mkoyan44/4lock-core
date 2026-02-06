@@ -1,8 +1,21 @@
-# Root workspace: daemon (package owning blob, container, vappc) and publish only.
-# Build: cargo build -p daemon or cargo build -p publish
-[workspace]
-resolver = "2"
-members = ["daemon", "publish"]
+# Daemon package: root "daemon" depends on blob, container, vappc (all necessary info here).
+# Build from repo root: cargo build -p daemon
+# Build from daemon dir: cargo build --manifest-path daemon/Cargo.toml (profiles/patch below apply)
+# Cross: daemon/Cross.toml (used by publish when building Linux binaries)
+
+[package]
+name = "daemon"
+version = "0.1.0"
+edition = "2021"
+description = "4lock-core daemon workspace root (blob, container, vappc)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+blob = { path = "src/blob" }
+container = { path = "src/container" }
+vappc = { path = "src/vappc" }
 
 [profile.release]
 panic = "abort"
