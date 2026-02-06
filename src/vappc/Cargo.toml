@@ -1,0 +1,29 @@
+[package]
+name = "vappc"
+version = "0.1.0"
+edition = "2021"
+description = "vapp core: minimal vappd and vappctl for 4lock-core. No dependency on 4lock-agent."
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = "0.3"
+notify = "6"  # Uses inotify on Linux for binary hot-reload
+
+# Single daemon binary (source: vappc.rs).
+# Guest expects: /mnt/vapp/vappc-linux-daemon --socket vsock:49163
+# With vsock:PORT the daemon also listens on TCP 127.0.0.1:PORT for SSH port-forward (hosts without VSOCK, e.g. Windows).
+[[bin]]
+name = "vappc-linux-daemon"
+path = "src/bin/vappc.rs"
+
+[dependencies]
+container = { path = "../container" }
+
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "io-util"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "5"
+libc = "0.2"

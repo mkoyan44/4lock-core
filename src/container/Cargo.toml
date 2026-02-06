@@ -1,0 +1,57 @@
+[package]
+name = "container"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+# Intent and provisioner types are defined in this crate (4lock-core has no dependency on 4lock-agent runtime).
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+thiserror = "1.0"
+anyhow = "1.0"
+dirs = "5.0"
+tar = "0.4"
+flate2 = "1.0"
+regex = "1.10"
+tera = "1"
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls", "blocking"] }
+futures = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-pemfile = "2"
+hyper-rustls = { version = "0.27", default-features = false, features = ["http2", "ring"] }
+hyper-util = { version = "0.1", features = ["client", "http1", "http2"] }
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+http-body-util = "0.1"
+base64 = "0.22"
+
+# Linux-specific dependencies (only resolved on Linux targets)
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.29", features = ["user", "process", "signal"] }
+# Updated to v0.5.7 to include fix for issue #3262: "Waiting on systemd to add intermediate process to cgroup"
+# This should fix the hang after process is added to cgroup
+liboci-cli = { git = "https://github.com/youki-dev/youki.git", rev = "bd54457ba9de1629f21fe678687f433aec63e7c7", package = "liboci-cli" }
+# CRITICAL: Enable systemd feature to use systemd cgroup manager for rootless containers
+# Systemd cgroup manager properly supports rootless containers and respects cgroup delegation
+# D-Bus detection logic in lifecycle.rs handles cases where D-Bus is not available
+libcontainer = { git = "https://github.com/youki-dev/youki.git", rev = "bd54457ba9de1629f21fe678687f433aec63e7c7", package = "libcontainer", default-features = false, features = ["v2", "v1", "systemd"] }
+# CRITICAL: Explicitly enable systemd feature in libcgroups (transitive dependency)
+# This allows libcgroups to use systemd cgroup manager which works properly with rootless containers
+libcgroups = { git = "https://github.com/youki-dev/youki.git", rev = "bd54457ba9de1629f21fe678687f433aec63e7c7", package = "libcgroups", default-features = false, features = ["systemd"] }
+# CRI gRPC server dependencies
+tonic = "0.12"
+prost = "0.13"
+tokio-stream = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tempfile = "3"
+
+

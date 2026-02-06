@@ -1,0 +1,22 @@
+[Unit]
+Description=4lock vappc Linux daemon
+Documentation=https://github.com/4lock/4lock-core
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/4lock/vappc-linux-daemon --socket /run/vapp/vappc.sock --app-dir /var/lib/vapp
+
+User=vapp
+Group=vapp
+
+RuntimeDirectory=vapp
+RuntimeDirectoryMode=0770
+
+StateDirectory=vapp
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
