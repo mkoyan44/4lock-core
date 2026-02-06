@@ -3,7 +3,7 @@
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
-    eprintln!("vappc-linux-daemon from 4lock-core is Linux-only. Use 4lock-agent on other platforms.");
+    eprintln!("vappc-linux-daemon from 4lock-core is Linux-only. Use vapp on other platforms.");
     std::process::exit(1);
 }
 
@@ -71,12 +71,8 @@ fn main() {
     }
 
     #[derive(Parser, Debug)]
-    #[command(name = "vappc-linux-daemon", version, about = "4Lock container daemon (4lock-core, Linux only)")]
+    #[command(name = "vappc-linux-daemon", version, about = "vapp container daemon (4lock-core, Linux only)")]
     struct Args {
-
-
-
-
 
 
 
@@ -84,7 +80,7 @@ fn main() {
         #[arg(short = 's', long = "socket", default_value = "/tmp/vappc.sock")]
         socket: String,
 
-        #[arg(long = "app-dir", help = "App directory (default: ~/.4lock-agent)")]
+        #[arg(long = "app-dir", help = "App directory (default: ~/.vapp)")]
         app_dir: Option<PathBuf>,
     }
 
@@ -99,7 +95,7 @@ fn main() {
     let app_dir = args.app_dir.unwrap_or_else(|| {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(".4lock-agent")
+            .join(".vapp")
     });
 
     // Always print startup banner (visible even without RUST_LOG)

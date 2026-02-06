@@ -65,123 +65,128 @@ fn get_interface_ip(_interface: &str) -> Result<String, String> {
     Err("GetInterfaceIp only supported on Linux".to_string())
 }
 
+/// Handle multiple requests on the same connection (read → parse → respond → write) until read returns 0 or error.
+/// This allows the host to send Ping then Start over one VSOCK connection without the guest closing after Ping.
 async fn handle_client<S>(mut stream: S, peer: String, intent_tx: mpsc::Sender<RuntimeIntent>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
 {
     let mut buffer = vec![0u8; 65536];
-    match stream.read(&mut buffer).await {
-        Ok(0) => return,
-        Ok(n) => {
-            let request = &buffer[..n];
-            debug!("Daemon: request from {} ({} bytes)", peer, n);
-
-            let cmd: Result<VappcCommand, _> = serde_json::from_slice(request);
-            if let Ok(ref c) = cmd {
-                info!("Daemon: command from {}: {}", peer, cmd_short_label(c));
+    loop {
+        let n = match stream.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                error!("Daemon: read error from {}: {}", peer, e);
+                break;
             }
-            let response = match cmd {
-                Ok(VappcCommand::Ping) => VappcResponse::ok_unit(),
-                Ok(VappcCommand::Start { spec }) => {
-                    let (progress_tx, _progress_rx) = mpsc::channel::<RuntimeStartProgress>(4);
-                    let (callback_tx, callback_rx) = oneshot::channel();
-                    let intent = RuntimeIntent::Start {
-                        spec: Box::new(spec),
-                        progress: progress_tx,
-                        callback: callback_tx,
-                    };
-                    if intent_tx.send(intent).await.is_err() {
-                        VappcResponse::err("Intent loop disconnected".to_string())
-                    } else {
-                        match callback_rx.await {
-                            Ok(Ok(handle)) => VappcResponse::ok_handle(handle),
-                            Ok(Err(e)) => VappcResponse::err(e),
-                            Err(_) => VappcResponse::err("Intent loop dropped callback".to_string()),
-                        }
-                    }
-                }
-                Ok(VappcCommand::RunContainer { spec }) => {
-                    let (progress_tx, _progress_rx) = mpsc::channel::<RuntimeStartProgress>(4);
-                    let (callback_tx, callback_rx) = oneshot::channel();
-                    let intent = RuntimeIntent::RunContainer {
-                        spec,
-                        progress: progress_tx,
-                        callback: callback_tx,
-                    };
-                    if intent_tx.send(intent).await.is_err() {
-                        VappcResponse::err("Intent loop disconnected".to_string())
-                    } else {
-                        match callback_rx.await {
-                            Ok(Ok(handle)) => VappcResponse::ok_handle(handle),
-                            Ok(Err(e)) => VappcResponse::err(e),
-                            Err(_) => VappcResponse::err("Intent loop dropped callback".to_string()),
-                        }
-                    }
-                }
-                Ok(VappcCommand::Stop { instance_id }) => {
-                    let intent = RuntimeIntent::Stop { instance_id };
-                    if intent_tx.send(intent).await.is_err() {
-                        VappcResponse::err("Intent loop disconnected".to_string())
-                    } else {
-                        VappcResponse::ok_unit()
-                    }
-                }
-                Ok(VappcCommand::GetState { instance_id }) => {
-                    let (reply_tx, mut reply_rx) = mpsc::channel::<container::intent::InstanceState>(1);
-                    let intent = RuntimeIntent::GetState {
-                        instance_id,
-                        reply: reply_tx,
-                    };
-                    if intent_tx.send(intent).await.is_err() {
-                        VappcResponse::err("Intent loop disconnected".to_string())
-                    } else {
-                        match reply_rx.recv().await {
-                            Some(state) => VappcResponse::ok_state(state),
-                            None => VappcResponse::err("Intent loop did not reply".to_string()),
-                        }
-                    }
-                }
-                Ok(VappcCommand::GetEndpoint { instance_id }) => {
-                    let (callback_tx, callback_rx) = oneshot::channel();
-                    let intent = RuntimeIntent::GetEndpoint {
-                        instance_id,
-                        callback: callback_tx,
-                    };
-                    if intent_tx.send(intent).await.is_err() {
-                        VappcResponse::err("Intent loop disconnected".to_string())
-                    } else {
-                        match callback_rx.await {
-                            Ok(Ok(ep)) => VappcResponse::ok_endpoint(ep),
-                            Ok(Err(e)) => VappcResponse::err(e),
-                            Err(_) => VappcResponse::err("Intent loop dropped callback".to_string()),
-                        }
-                    }
-                }
-                Ok(VappcCommand::GetInterfaceIp { interface }) => {
-                    match get_interface_ip(&interface) {
-                        Ok(ip) => VappcResponse::ok_interface_ip(interface, Some(ip)),
-                        Err(_) => VappcResponse::ok_interface_ip(interface, None),
-                    }
-                }
-                Err(e) => {
-                    error!("Daemon: invalid command JSON: {}", e);
-                    VappcResponse::err(format!("Invalid command: {}", e))
-                }
-            };
+        };
+        let request = &buffer[..n];
+        debug!("Daemon: request from {} ({} bytes)", peer, n);
 
-            let serialized = match serde_json::to_vec(&response) {
-                Ok(b) => b,
-                Err(e) => {
-                    error!("Daemon: failed to serialize response: {}", e);
-                    serde_json::to_vec(&VappcResponse::err(e.to_string())).unwrap_or_default()
-                }
-            };
-            if let Err(e) = stream.write_all(&serialized).await {
-                error!("Daemon: failed to send response to {}: {}", peer, e);
-            }
+        let cmd: Result<VappcCommand, _> = serde_json::from_slice(request);
+        if let Ok(ref c) = cmd {
+            info!("Daemon: command from {}: {}", peer, cmd_short_label(c));
         }
-        Err(e) => {
-            error!("Daemon: read error from {}: {}", peer, e);
+        let response = match cmd {
+            Ok(VappcCommand::Ping) => VappcResponse::ok_unit(),
+            Ok(VappcCommand::Start { spec }) => {
+                let (progress_tx, _progress_rx) = mpsc::channel::<RuntimeStartProgress>(4);
+                let (callback_tx, callback_rx) = oneshot::channel();
+                let intent = RuntimeIntent::Start {
+                    spec: Box::new(spec),
+                    progress: progress_tx,
+                    callback: callback_tx,
+                };
+                if intent_tx.send(intent).await.is_err() {
+                    VappcResponse::err("Intent loop disconnected".to_string())
+                } else {
+                    match callback_rx.await {
+                        Ok(Ok(handle)) => VappcResponse::ok_handle(handle),
+                        Ok(Err(e)) => VappcResponse::err(e),
+                        Err(_) => VappcResponse::err("Intent loop dropped callback".to_string()),
+                    }
+                }
+            }
+            Ok(VappcCommand::RunContainer { spec }) => {
+                let (progress_tx, _progress_rx) = mpsc::channel::<RuntimeStartProgress>(4);
+                let (callback_tx, callback_rx) = oneshot::channel();
+                let intent = RuntimeIntent::RunContainer {
+                    spec,
+                    progress: progress_tx,
+                    callback: callback_tx,
+                };
+                if intent_tx.send(intent).await.is_err() {
+                    VappcResponse::err("Intent loop disconnected".to_string())
+                } else {
+                    match callback_rx.await {
+                        Ok(Ok(handle)) => VappcResponse::ok_handle(handle),
+                        Ok(Err(e)) => VappcResponse::err(e),
+                        Err(_) => VappcResponse::err("Intent loop dropped callback".to_string()),
+                    }
+                }
+            }
+            Ok(VappcCommand::Stop { instance_id }) => {
+                let intent = RuntimeIntent::Stop { instance_id };
+                if intent_tx.send(intent).await.is_err() {
+                    VappcResponse::err("Intent loop disconnected".to_string())
+                } else {
+                    VappcResponse::ok_unit()
+                }
+            }
+            Ok(VappcCommand::GetState { instance_id }) => {
+                let (reply_tx, mut reply_rx) = mpsc::channel::<container::intent::InstanceState>(1);
+                let intent = RuntimeIntent::GetState {
+                    instance_id,
+                    reply: reply_tx,
+                };
+                if intent_tx.send(intent).await.is_err() {
+                    VappcResponse::err("Intent loop disconnected".to_string())
+                } else {
+                    match reply_rx.recv().await {
+                        Some(state) => VappcResponse::ok_state(state),
+                        None => VappcResponse::err("Intent loop did not reply".to_string()),
+                    }
+                }
+            }
+            Ok(VappcCommand::GetEndpoint { instance_id }) => {
+                let (callback_tx, callback_rx) = oneshot::channel();
+                let intent = RuntimeIntent::GetEndpoint {
+                    instance_id,
+                    callback: callback_tx,
+                };
+                if intent_tx.send(intent).await.is_err() {
+                    VappcResponse::err("Intent loop disconnected".to_string())
+                } else {
+                    match callback_rx.await {
+                        Ok(Ok(ep)) => VappcResponse::ok_endpoint(ep),
+                        Ok(Err(e)) => VappcResponse::err(e),
+                        Err(_) => VappcResponse::err("Intent loop dropped callback".to_string()),
+                    }
+                }
+            }
+            Ok(VappcCommand::GetInterfaceIp { interface }) => {
+                match get_interface_ip(&interface) {
+                    Ok(ip) => VappcResponse::ok_interface_ip(interface, Some(ip)),
+                    Err(_) => VappcResponse::ok_interface_ip(interface, None),
+                }
+            }
+            Err(e) => {
+                error!("Daemon: invalid command JSON: {}", e);
+                VappcResponse::err(format!("Invalid command: {}", e))
+            }
+        };
+
+        let serialized = match serde_json::to_vec(&response) {
+            Ok(b) => b,
+            Err(e) => {
+                error!("Daemon: failed to serialize response: {}", e);
+                serde_json::to_vec(&VappcResponse::err(e.to_string())).unwrap_or_default()
+            }
+        };
+        if let Err(e) = stream.write_all(&serialized).await {
+            error!("Daemon: failed to send response to {}: {}", peer, e);
+            break;
         }
     }
 }

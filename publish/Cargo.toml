@@ -1,0 +1,13 @@
+# Crate to publish vappc-linux-daemon to Nexus (build.rs builds and uploads).
+# Run from 4lock-core root: cargo build --manifest-path publish/Cargo.toml
+# Requires: NEXUS_URL, NEXUS_REPO, NEXUS_USERNAME, NEXUS_PASSWORD
+
+[package]
+name = "publish"
+version = "0.1.0"
+edition = "2021"
+description = "Build and publish vappc-linux-daemon to Nexus"
+publish = false
+
+[build-dependencies]
+reqwest = { version = "0.12", features = ["blocking"] }

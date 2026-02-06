@@ -592,15 +592,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "daemon"
-version = "0.1.0"
-dependencies = [
- "blob",
- "container",
- "vappc",
-]
-
-[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2274,13 +2265,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5d4d7b8601c814cfb36bcebb79f0e61e45e1e93640cf778837833bbed05c372"
 dependencies = [
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "publish"
-version = "0.1.0"
-dependencies = [
- "reqwest",
 ]
 
 [[package]]
@@ -4145,8 +4129,3 @@ name = "zmij"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ff05f8caa9038894637571ae6b9e29466c1f4f829d26c9b28f869a29cbe3445"
-
-[[patch.unused]]
-name = "h2"
-version = "0.3.0"
-source = "git+https://github.com/saschagrunert/h2.git?branch=authority#1f99ad3217fe437d2986fd86f0ba1c36952b7dd4"

@@ -1,39 +1,25 @@
 # 4lock-core
 
-**Linux-only.** Core crates for the 4lock platform: container runtime, vappc daemon, and blob (docker-proxy) server. Build and run on Linux only; for cross-compilation from macOS/Windows (e.g. when building 4lock-agent), use the tooling in 4lock-agent that invokes Docker/nerdctl to build the Linux binary.
+Core crates and tooling for the 4lock platform.
 
-This repository is consumed by [4lock-agent](https://github.com/4lock/4lock-agent) as a path or git dependency.
+- **daemon/** – Primary code: blob (registry proxy), container (OCI/CRI runtime), vappc (daemon + client). See [daemon/README.md](daemon/README.md).
+- **publish/** – Builds `vappc-linux-daemon` for Linux targets and uploads to Nexus (cargo/artifact repo). See [publish/README.md](publish/README.md).
 
-## Workspace
-
-- **blob** – Docker/OCI registry proxy server (image pull cache).
-- **container** – Linux rootless OCI container runtime, CRI server, bootstrap, and provisioning.
-- **vappc** – vappc daemon and client library; provides the Unix/VSOCK/TCP socket API used by 4lock-agent on Linux.
-
-## Building
-
-**Requires Linux.** Build from this repository on a Linux host:
+**Build** (from repo root):
 
 ```bash
-# All crates
-cargo build --workspace
-
-# vappc-linux-daemon only
-cargo build -p vappc --release --bin vappc-linux-daemon
+cargo build -p daemon          # or cargo build --release -p daemon
 ```
 
-Binary output: `target/release/vappc-linux-daemon` (or `target/debug/` for dev profile). On non-Linux hosts the build will fail with a clear message; use 4lock-agent’s build (which cross-compiles via Docker/nerdctl) to produce the daemon binary.
+**Publish** (build Linux binaries and make data available on Nexus):
 
-## 4lock-agent integration
+```bash
+# Required for upload; without these, build still runs but nothing is uploaded
+export NEXUS_USERNAME="..."
+export NEXUS_PASSWORD="..."
+cargo build --release -p publish
+```
 
-4lock-agent depends on the **vappc** crate (client library) and, when building the agent, builds **vappc-linux-daemon** from this repo and embeds it for Linux VMs/containers.
+When `NEXUS_USERNAME` and `NEXUS_PASSWORD` are set, the publish step **requires** at least one successful upload so that artifacts are available on the repo. See [publish/README.md](publish/README.md) for cross/Docker and CI.
 
-- Clone 4lock-core next to 4lock-agent (e.g. `platform/4lock-agent` and `platform/4lock-core`).
-- Or set `LOCK4_CORE_DIR` to the path to 4lock-core when building 4lock-agent.
-
-See 4lock-agent docs for full build and run instructions.
-
-## Packaging
-
-- **systemd**: `packaging/systemd/vappc-linux-daemon.service` and `packaging/README-vappc-systemd.md` for running vappc as a system service (vapp:vapp, socket at `/run/vapp/vappc.sock`).
-- **4lock-de** Ansible playbooks can install the binary and unit from this repo or from a release artifact.
+Consumed by [4lock-agent](https://github.com/4lock/4lock-agent) as a path or git dependency.

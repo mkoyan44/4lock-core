@@ -1,5 +1,5 @@
 # Development build container for vappc-linux-daemon
-# Build: nerdctl build -t vappc-dev -f crates/core/Dockerfile.dev .
+# Build from repo root: nerdctl build -t vappc-dev -f daemon/Dockerfile.dev .
 FROM rust:latest
 RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
