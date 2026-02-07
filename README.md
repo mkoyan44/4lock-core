@@ -1,34 +1,40 @@
 # 4lock-core
 
-Core crates and tooling for the 4lock platform.
+Core crates and tooling for the 4lock platform (Linux only).
 
-- **daemon/** – Primary code: blob (registry proxy), container (OCI/CRI runtime), vappc (daemon + client). See [daemon/README.md](daemon/README.md).
-- **publish/** – Builds `vappc-linux-daemon` for Linux targets and uploads to Nexus (cargo/artifact repo). See [publish/README.md](publish/README.md).
+- **src/blob** – Registry proxy (image pull cache).
+- **src/container** – Rootless OCI/CRI runtime, bootstrap, provisioning.
+- **src/vappc** – vappc daemon and client (Unix/VSOCK socket API for 4lock-agent).
+- **docs/** – [docs/README.md](docs/README.md) – build, run, packaging.
+- **packaging/** – systemd unit and [README](packaging/README-vappc-systemd.md).
 
 **Build** (from repo root, Linux only):
 
 ```bash
-cargo build -p daemon          # or cargo build --release -p daemon
+cargo build -p daemon
+# or binary only:
+cargo build -p vappc --release --bin vappc-linux-daemon
 ```
 
-**Build and run with nerdctl** (same approach as 4lock-api: Makefile + `docker/`):
+**Build and run with nerdctl** (Makefile + `docker/`):
 
 ```bash
-cp .env.example .env   # set GH_OWNER, GH_TOKEN, TARGET_ARCH=amd64 or arm64
-make build             # nerdctl build -f docker/dockerfiles/Dockerfile.core ...
-make run               # run image (socket at /tmp/vappc)
-make all               # build + push to ghcr.io
+# Default: build then run (no .env required; TARGET_ARCH auto-detected)
+make                  # same as: make from-scratch
+
+# Explicit from-scratch
+make from-scratch     # or: make build && make run
+
+# Release build (uses BuildKit cache; later rebuilds only recompile changed crates)
+make build
+make run               # --privileged; socket at /tmp/vappc; Ctrl+C stops container and exits
+
+# Fast iteration when changing code in src/: dev profile + cache mounts
+make build-dev && make run-dev
+
+# Optional .env for push: GH_OWNER, GH_TOKEN
+make push
+make all
 ```
-
-**Publish** (build Linux binaries and make data available on Nexus):
-
-```bash
-# Required for upload; without these, build still runs but nothing is uploaded
-export NEXUS_USERNAME="..."
-export NEXUS_PASSWORD="..."
-cargo build --release -p publish
-```
-
-When `NEXUS_USERNAME` and `NEXUS_PASSWORD` are set, the publish step **requires** at least one successful upload so that artifacts are available on the repo. See [publish/README.md](publish/README.md) for cross/Docker and CI.
 
 Consumed by [4lock-agent](https://github.com/4lock/4lock-agent) as a path or git dependency.

@@ -1,0 +1,64 @@
+---
+description: MANDATORY rule to always include documentation and rules in context when responding to user requests. Ensures all responses have full architectural and procedural context for 4lock-core.
+alwaysApply: true
+priority: 1
+---
+
+# Context Inclusion Rule - MANDATORY (4lock-core)
+
+## CRITICAL: Always Include Docs and Rules in Context
+
+**EVERY response to a user request MUST include relevant documentation and rules in the context.**
+
+### When User Asks to Do Something
+
+**BEFORE starting any task, you MUST:**
+
+1. **Read relevant documentation** from `.cursor/docs/`:
+   - Start with `.cursor/docs/00-overview.md` for system purpose and layout
+   - Consult `.cursor/docs/01-crate-architecture.md` for crate structure (blob, container, vappc)
+   - Reference `.cursor/docs/05-development-guide.md` for build, run, and testing
+
+2. **Review relevant rules** from `.cursor/rules/`:
+   - `.cursor/rules/01-core-project.mdc` – Project structure and guidelines
+   - `.cursor/rules/02-rust-workspace.mdc` – Rust workspace rules
+   - `.cursor/rules/04-cursor-workflow.mdc` – Development workflow
+   - `.cursor/rules/05-architecture-usage.mdc` – Architecture consultation
+   - `.cursor/rules/00-os-specific-rules.mdc` – Linux-only and build/run context
+
+3. **Include in your response**:
+   - Reference the documentation you consulted
+   - Mention relevant rules that apply
+   - Explain how your solution follows the documented patterns
+
+### Documentation Location (4lock-core)
+
+**All documentation is in `.cursor/docs/`**:
+- **Overview**: `.cursor/docs/00-overview.md` – System purpose, layout, design principles
+- **Crate structure**: `.cursor/docs/01-crate-architecture.md` – blob, container, vappc modules
+- **Development**: `.cursor/docs/05-development-guide.md` – Cargo, Makefile, docker, testing
+
+### Rules Location
+
+**All rules are in `.cursor/rules/`**:
+- Core: `.cursor/rules/01-core-project.mdc`
+- Rust: `.cursor/rules/02-rust-workspace.mdc`
+- Workflow: `.cursor/rules/04-cursor-workflow.mdc`
+- Architecture: `.cursor/rules/05-architecture-usage.mdc`
+- OS: `.cursor/rules/00-os-specific-rules.mdc`
+
+### Quick Reference
+
+**Essential docs for most tasks:**
+1. `.cursor/docs/00-overview.md` – Overall architecture
+2. `.cursor/docs/01-crate-architecture.md` – Where things belong (blob vs container vs vappc)
+3. `.cursor/rules/01-core-project.mdc` – Project structure
+4. `.cursor/rules/05-architecture-usage.mdc` – When to consult which doc
+
+**For specific tasks:**
+- Crate placement → `.cursor/docs/01-crate-architecture.md`
+- Bootstrap / CRI / OCI → `.cursor/docs/01-crate-architecture.md` (container), `.cursor/docs/00-overview.md`
+- Build / run / Makefile → `.cursor/docs/05-development-guide.md`
+- Linux / containerized build → `.cursor/rules/00-os-specific-rules.mdc`
+
+**IMPORTANT**: All documentation in `.cursor/docs/` is authoritative and must be followed.

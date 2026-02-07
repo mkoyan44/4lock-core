@@ -12,23 +12,17 @@ This repository is consumed by [4lock-agent](https://github.com/4lock/4lock-agen
 
 ## Building
 
-**Requires Linux.** Build from repo root or from this directory:
+**Requires Linux.** Build from repo root:
 
 ```bash
-# From repo root – all workspace crates (daemon + publish)
-cargo build --workspace
+# All daemon crates (blob, container, vappc)
+cargo build -p daemon
 
-# From repo root – daemon crates only
-cargo build -p blob -p container -p vappc
-
-# From daemon/ – daemon crates only
-cargo build --manifest-path daemon/Cargo.toml
-
-# vappc-linux-daemon only
+# vappc-linux-daemon binary only
 cargo build -p vappc --release --bin vappc-linux-daemon
 ```
 
-Binary output: `target/release/vappc-linux-daemon` (or `target/debug/` for dev profile). On non-Linux hosts the build will fail with a clear message; use 4lock-agent’s build (which cross-compiles via Docker/nerdctl) to produce the daemon binary.
+Output: `target/release/vappc-linux-daemon`. On non-Linux hosts use the Makefile (builds inside a Linux container via nerdctl).
 
 ## Build and run with nerdctl (same approach as 4lock-api)
 
@@ -36,17 +30,23 @@ Use **Makefile** and **docker/** (same layout as 4lock-api):
 
 - **docker/dockerfiles/Dockerfile.core** – multi-stage build, `TARGET_ARCH` (arm64/amd64)
 - **docker/entrypoints/docker-entrypoint-core.sh** – entrypoint for vappc-linux-daemon
-- **Makefile** – requires `.env` (GH_OWNER, GH_TOKEN, TARGET_ARCH); targets: `build`, `push`, `run`, `all`
+- **Makefile** – `TARGET_ARCH` auto-detected from host. Override in `.env` if needed. `GH_OWNER`/`GH_TOKEN` only for `push`. Targets: `build`, `run`, `build-dev`, `run-dev`, `from-scratch`, `push`, `all`. `build` uses BuildKit cache mounts (Cargo registry + `target/`) so only changed crates recompile. `build-dev` uses the dev-fast profile for faster compile when iterating on code in `src/`.
 
 ```bash
-cp .env.example .env   # set GH_OWNER, GH_TOKEN, TARGET_ARCH=amd64 or arm64
-make build             # nerdctl build -f docker/dockerfiles/Dockerfile.core ...
-make run               # run image (mounts /tmp/vappc for socket)
-make all               # build + push to ghcr.io
+# From scratch
+make from-scratch      # build then run (release)
+
+make build             # release; cache mounts speed up later rebuilds
+make run               # --privileged; socket at /tmp/vappc; runs detached + logs -f; Ctrl+C stops and removes container
+
+# Fast iteration when changing code in src/
+make build-dev && make run-dev
+
+make push
+make all
 ```
 
-Backward compatibility: you can still build with the root `Dockerfile` (single-arch, no .env):  
-`nerdctl build -t 4lock-core .`
+Without `GH_OWNER` in `.env`, image is tagged `4lock-core:latest` for local run. Root `Dockerfile`: `nerdctl build -t 4lock-core .` (single-arch).
 
 ## Cross (nerdctl/Docker)
 
@@ -63,5 +63,5 @@ See 4lock-agent docs for full build and run instructions.
 
 ## Packaging
 
-- **systemd**: `publish/packaging/systemd/vappc-linux-daemon.service` and `publish/packaging/README-vappc-systemd.md` for running vappc as a system service (vapp:vapp, socket at `/run/vapp/vappc.sock`).
-- **4lock-de** Ansible playbooks can install the binary and unit from this repo or from a release artifact.
+- **systemd**: [packaging/systemd/vappc-linux-daemon.service](../packaging/systemd/vappc-linux-daemon.service) and [packaging/README-vappc-systemd.md](../packaging/README-vappc-systemd.md) – socket at `/run/vapp/vappc.sock`, user `vapp`.
+- **4lock-de** Ansible can install the binary and unit from this repo or a release artifact.

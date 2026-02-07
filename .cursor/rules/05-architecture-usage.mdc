@@ -1,0 +1,75 @@
+---
+description: Architecture consultation requirements for 4lock-core. When to read which docs; crate placement; bootstrap and protocol rules. No event bus/FSM (that is in 4lock-agent).
+alwaysApply: true
+---
+
+# Architecture Usage Rules for 4lock-core
+
+These rules ensure consistency and correct use of architecture documentation when developing in 4lock-core.
+
+## Mandatory Architecture Consultation
+
+### Before Making Changes
+
+**ALWAYS consult architecture documentation before**:
+- Adding new features or modules
+- Modifying cross-crate or public APIs
+- Changing bootstrap workflows, CRI behavior, or daemon protocol
+- Adding or changing templates and tasks
+
+**Location**: All architecture docs are in `.cursor/docs/`
+- Start with `.cursor/docs/00-overview.md` for context
+- Use `.cursor/docs/01-crate-architecture.md` for crate boundaries and module layout
+- Use `.cursor/docs/05-development-guide.md` for build, run, and test procedures
+
+### Decision Framework
+
+1. **Where does this belong?**
+   - **blob** – Registry proxy, cache, prepull, Helm.
+   - **container** – Rootless OCI, CRI server, bootstrap (intent loop, provisioner, templates, tasks).
+   - **vappc** – Daemon, client, wire protocol.
+   - Use `.cursor/docs/01-crate-architecture.md` to confirm.
+
+2. **Does it affect bootstrap?**
+   - Keep tasks **idempotent**; validate template variables; use numbered script names.
+   - Document in comments or docs if you change workflow semantics.
+
+3. **Does it affect the daemon or protocol?**
+   - vappc protocol is consumed by 4lock-agent. Prefer backward-compatible extensions.
+   - See `.cursor/docs/01-crate-architecture.md` (vappc) and `.cursor/docs/00-overview.md`.
+
+4. **Does it affect CRI or OCI?**
+   - CRI: `container/cri/`. OCI/rootless: `container/rootless/`. Follow existing patterns and Linux rootless rules (host networking, pivot_root, etc.).
+
+5. **How do I implement it?**
+   - Follow `.cursor/docs/05-development-guide.md` for build/test and `.cursor/docs/01-crate-architecture.md` for where to add code.
+
+## Bootstrap and Container Rules (4lock-core)
+
+- **Idempotent tasks**: Scripts and steps must be safe to re-run (check before mutate).
+- **Template variables**: Validate in Jinja2/templates; fail fast with clear errors if required vars are missing.
+- **Numbered ordering**: Use prefixes (e.g. 10-*.sh, 20-*.sh) for script order.
+- **CRI/OCI**: Do not change host networking or pivot_root semantics without aligning with Linux rootless docs and tests.
+
+## API and Protocol Rules
+
+- **Public APIs**: Document with docstrings; return `Result<T, E>`; maintain backward compatibility when possible.
+- **vappc protocol**: Changes can break 4lock-agent; version or extend in a backward-compatible way.
+- When changing public APIs: grep for usages, update call sites, add/update tests.
+
+## Code Review Checklist
+
+- [ ] Consulted relevant docs (overview, crate-architecture, dev-guide)
+- [ ] Feature placed in correct crate (blob / container / vappc)
+- [ ] Bootstrap tasks idempotent and template vars validated
+- [ ] CRI/OCI and protocol changes documented and tested
+- [ ] `cargo test` (scoped or workspace) run and passing
+
+## Quick Reference (4lock-core)
+
+- **Overview**: `.cursor/docs/00-overview.md`
+- **Crate layout**: `.cursor/docs/01-crate-architecture.md`
+- **Build/run/test**: `.cursor/docs/05-development-guide.md`
+- **Rules**: `.cursor/rules/01-core-project.mdc`, `.cursor/rules/02-rust-workspace.mdc`, `.cursor/rules/00-os-specific-rules.mdc`
+
+**Note**: 4lock-core has no event bus or FSM; those live in 4lock-agent. Here we have daemon/client protocol, container bootstrap, and CRI/OCI behavior.

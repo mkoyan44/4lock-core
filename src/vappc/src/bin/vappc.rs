@@ -122,7 +122,7 @@ fn main() {
     // Create runtime FIRST, then spawn tasks within it
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
-    let result = rt.block_on(async {
+    let result: anyhow::Result<()> = rt.block_on(async {
         let (intent_tx, intent_rx) = mpsc::channel(32);
 
         // Spawn hot-reload watcher (watches binary via virtio-fs mount)
@@ -145,7 +145,7 @@ fn main() {
             }
         });
 
-        // Run the main daemon server
+        // Run the main daemon server(s) in background so we can listen for Ctrl+C
         if args.socket.starts_with("vsock:") {
             let port: u32 = args.socket["vsock:".len()..]
                 .trim()
@@ -158,18 +158,22 @@ fn main() {
             eprintln!("  VSOCK listener: port {}", port);
             eprintln!("  TCP listener: {} (for SSH port-forward, e.g. ssh -L local:127.0.0.1:{})", tcp_addr, port);
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            eprintln!("  vappc-linux-daemon ready and listening!");
+            eprintln!("  vappc-linux-daemon ready and listening! (Ctrl+C to exit)");
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            // Spawn VSOCK server in background; run TCP server in foreground (blocks forever).
             tokio::spawn(daemon::run_daemon_server_vsock(port, intent_tx.clone()));
-            daemon::run_daemon_server_tcp(&tcp_addr, intent_tx).await
+            tokio::spawn(async move { daemon::run_daemon_server_tcp(&tcp_addr, intent_tx).await });
+            tokio::signal::ctrl_c().await.expect("failed to listen for Ctrl+C");
         } else {
             eprintln!("  Unix socket: {}", args.socket);
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            eprintln!("  vappc-linux-daemon ready and listening!");
+            eprintln!("  vappc-linux-daemon ready and listening! (Ctrl+C to exit)");
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            daemon::run_daemon_server(&args.socket, intent_tx).await
+            let socket = args.socket.clone();
+            tokio::spawn(async move { daemon::run_daemon_server(&socket, intent_tx).await });
+            tokio::signal::ctrl_c().await.expect("failed to listen for Ctrl+C");
         }
+        info!("Received Ctrl+C, shutting down");
+        Ok(())
     });
 
     if let Err(e) = result {
