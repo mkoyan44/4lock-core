@@ -1,21 +1,21 @@
-# vappc-linux-daemon systemd service
+# vapp-core-daemon systemd service
 
-Run vappc-linux-daemon as a system service under user/group **vapp:vapp**.
+Run vapp-core-daemon as a system service under user/group **vapp:vapp**.
 
 ## Install path and socket
 
-- **Binary**: `/usr/local/lib/4lock/vappc-linux-daemon` (override via systemd unit or Ansible vars).
-- **Socket**: `/run/vapp/vappc.sock` (created by systemd `RuntimeDirectory=vapp`).
+- **Binary**: `/usr/local/lib/4lock/vapp-core-daemon` (override via systemd unit or Ansible vars).
+- **Socket**: `/run/vapp/vapp-core.sock` (created by systemd `RuntimeDirectory=vapp`).
 - **State**: `/var/lib/vapp` (bundles, CRI socket, app data).
 
 ## Client connection
 
 vapp and vappd resolve the socket in this order:
 
-1. `VAPPC_SOCKET` environment variable
-2. `vappc_share_dir()/vappc.sock` (Linux)
-3. `/run/vapp/vappc.sock` if it exists (systemd service)
-4. `/tmp/vappc.sock` (default)
+1. `VAPPC_SOCKET` environment variable (or equivalent for vapp-core)
+2. `vappc_share_dir()/vapp-core.sock` (Linux)
+3. `/run/vapp/vapp-core.sock` if it exists (systemd service)
+4. `/tmp/vapp-core.sock` (default)
 
 To let a user run vapp/vappd and connect to the system daemon, add them to the **vapp** group:
 
@@ -36,29 +36,29 @@ Then log out and back in (or `newgrp vapp`).
 2. Create dirs and install binary:
    ```bash
    sudo mkdir -p /usr/local/lib/4lock /var/lib/vapp
-   sudo cp target/release/vappc-linux-daemon /usr/local/lib/4lock/
-   sudo chmod 755 /usr/local/lib/4lock/vappc-linux-daemon
+   sudo cp target/release/vapp-core-daemon /usr/local/lib/4lock/
+   sudo chmod 755 /usr/local/lib/4lock/vapp-core-daemon
    sudo chown -R vapp:vapp /var/lib/vapp
    ```
 
 3. Install unit and start:
    ```bash
-   sudo cp packaging/systemd/vappc-linux-daemon.service /etc/systemd/system/
+   sudo cp packaging/systemd/vapp-core-daemon.service /etc/systemd/system/
    sudo systemctl daemon-reload
-   sudo systemctl enable --now vappc-linux-daemon.service
+   sudo systemctl enable --now vapp-core-daemon.service
    ```
 
 ## Install (Ansible, 4lock-de)
 
-From 4lock-de repo, run the playbook (optionally set `vappc_binary_src` to the built binary path):
+From 4lock-de repo, run the playbook (optionally set `vapp_core_binary_src` to the built binary path; playbook may use `vappc_binary_src` until 4lock-de is updated):
 
 ```bash
 ansible-playbook -i clusters/production-onprem-shared/ansible/inventory.ini \
   clusters/production-onprem-shared/ansible/playbooks/vappc-daemon.yml \
-  -e vappc_binary_src=/path/to/vappc-linux-daemon
+  -e vapp_core_binary_src=/path/to/vapp-core-daemon
 ```
 
-If `vappc_binary_src` is omitted, the binary must already be present at `/usr/local/lib/4lock/vappc-linux-daemon`.
+If the binary path var is omitted, the binary must already be present at `/usr/local/lib/4lock/vapp-core-daemon`.
 
 ## Privileged vs rootless
 

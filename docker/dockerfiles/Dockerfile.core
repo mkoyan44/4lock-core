@@ -1,6 +1,6 @@
 # 4lock-core: build and run on Linux only (via nerdctl).
 # Build: make build
-# Run:   make run  (or nerdctl run --rm -it --privileged -v /tmp/vappc:/tmp <image>)
+# Run:   make run  (or nerdctl run --rm -it --privileged -v /tmp/vapp-core:/tmp <image>)
 #        --privileged required for network/user namespaces (pasta, rootless containers).
 
 ARG TARGET_ARCH
@@ -33,11 +33,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
     set -e && \
     if [ "$BUILD_PROFILE" = "dev" ]; then \
-      cargo build --profile dev-fast -p vappc --bin vappc-linux-daemon && \
-      cp /app/target/dev-fast/vappc-linux-daemon /app/out/; \
+      cargo build --profile dev-fast -p vapp_core --bin vapp-core-daemon && \
+      cp /app/target/dev-fast/vapp-core-daemon /app/out/; \
     else \
-      cargo build --release -p vappc --bin vappc-linux-daemon && \
-      cp /app/target/release/vappc-linux-daemon /app/out/; \
+      cargo build --release -p vapp_core --bin vapp-core-daemon && \
+      cp /app/target/release/vapp-core-daemon /app/out/; \
     fi
 
 # -----------------------------------------------------------------------------
@@ -54,11 +54,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Daemon runs as root inside container (system_check accepts root + pasta)
 RUN mkdir -p /root/.vapp
 
-COPY --from=builder /app/out/vappc-linux-daemon /usr/local/bin/vappc-linux-daemon
+COPY --from=builder /app/out/vapp-core-daemon /usr/local/bin/vapp-core-daemon
 COPY docker/entrypoints/docker-entrypoint-core.sh /usr/local/bin/entrypoint
 RUN chmod 0755 /usr/local/bin/entrypoint
 
-# Default: Unix socket at /tmp/vappc.sock; override with --socket
+# Default: Unix socket at /tmp/vapp-core.sock; override with --socket
 ENV RUST_LOG=info
 ENTRYPOINT ["/usr/local/bin/entrypoint"]
-CMD ["--socket", "/tmp/vappc.sock", "--app-dir", "/root/.vapp"]
+CMD ["--socket", "/tmp/vapp-core.sock", "--app-dir", "/root/.vapp"]

@@ -50,29 +50,29 @@ This document describes the internal layout of each crate in the 4lock-core work
 
 ### Integration
 
-- vappc daemon starts and drives the container provisioner and intent loop; CRI socket is used by kubelet.
+- vapp-core daemon starts and drives the container provisioner and intent loop; CRI socket is used by kubelet.
 
 ---
 
-## 3. src/vappc – Daemon and Client
+## 3. src/vapp_core – Daemon and Client
 
-**Purpose**: vappc daemon (Unix/VSOCK socket server) and client library. This is the API that 4lock-agent uses on Linux to control the core (start/stop containers, bootstrap, etc.).
+**Purpose**: vapp-core daemon (Unix/VSOCK socket server) and client library. This is the API that 4lock-agent uses on Linux to control the core (start/stop containers, bootstrap, etc.).
 
-**Location**: `src/vappc/`
+**Location**: `src/vapp_core/`
 
 ### Notable modules
 
 - **daemon.rs** – Daemon process: socket listener, request handling, integration with container (provisioner, intent loop).
-- **client.rs** – Client used by 4lock-agent to send commands to the daemon.
-- **protocol.rs** – Wire protocol (messages, serialization).
+- **client.rs** – Stream wrapper and ping for protocol. Exposes `VappCoreStream`, `VappCorePing`. VappClient (in 4lock-agent) provides the high-level client API.
+- **protocol.rs** – Wire protocol (messages, serialization): `VappCoreCommand`, `VappCoreResponse`.
 
 ### Binaries
 
-- **vappc-linux-daemon** – Main daemon binary (Linux only). Typically run via `make run` (container) or systemd.
+- **vapp-core-daemon** – Main daemon binary (Linux only). Typically run via `make run` (container) or systemd.
 
 ### Integration
 
-- 4lock-agent links the vappc **client** crate and, on Linux, runs or embeds **vappc-linux-daemon** (from this repo). Socket default: `/tmp/vappc` (or `/run/vapp/vappc.sock` under systemd).
+- 4lock-agent links the vapp_core **client** crate and, on Linux, runs or embeds **vapp-core-daemon** (from this repo). Socket default: `/tmp/vapp-core.sock` (or `/run/vapp/vapp-core.sock` under systemd).
 
 ---
 
@@ -82,7 +82,7 @@ This document describes the internal layout of each crate in the 4lock-core work
 |-------------------|------------|----------------------------------------------------|
 | Registry / cache  | blob       | Proxy, cache, prepull                              |
 | OCI / CRI / K8s   | container  | Rootless runtime, CRI server, bootstrap, intents  |
-| Daemon / protocol | vappc      | Socket API, daemon, client                         |
+| Daemon / protocol | vapp_core  | Socket API, daemon, client                         |
 | Build / run       | Makefile   | nerdctl, Dockerfile.core, TARGET_ARCH              |
 
-When adding features: place registry/cache logic in blob; OCI/CRI/bootstrap in container; daemon protocol and client in vappc. Keep shared types in the crate that owns the concept or in a small `common`-style module within that crate.
+When adding features: place registry/cache logic in blob; OCI/CRI/bootstrap in container; daemon protocol and client in vapp_core. Keep shared types in the crate that owns the concept or in a small `common`-style module within that crate.

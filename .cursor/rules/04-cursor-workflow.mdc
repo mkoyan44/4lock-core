@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Cursor Workflow Rules for 4lock-core
 
-This is a **Linux-only Rust workspace** (blob, container, vappc). Build and run via **Cargo** on Linux or **Makefile + nerdctl** in a container. No Tauri, no frontend.
+This is a **Linux-only Rust workspace** (blob, container, vapp_core). Build and run via **Cargo** on Linux or **Makefile + nerdctl** in a container. No Tauri, no frontend.
 
 **CRITICAL**: Before starting any task, consult:
 - `.cursor/docs/00-overview.md` and `.cursor/docs/01-crate-architecture.md`
@@ -25,7 +25,7 @@ No mandatory log-file creation or Tauri-specific cleanup; use standard Cargo/Mak
 
 ## Build and Run (Source of Truth)
 
-- **On Linux (native)**: `cargo build -p daemon`, `cargo build -p vappc --release --bin vappc-linux-daemon`, `cargo test --workspace`.
+- **On Linux (native)**: `cargo build -p daemon`, `cargo build -p vapp_core --release --bin vapp-core-daemon`, `cargo test --workspace`.
 - **Any host (container)**: `make` (default: build then run), `make build`, `make run`, `make build-dev && make run-dev`.
 - **make run / make run-dev**: Container runs detached under name `4lock-core-run`; Makefile attaches with `nerdctl logs -f`. **Ctrl+C** in the terminal stops the container, removes it, and exits (trap + explicit `nerdctl stop`/`nerdctl rm`; nerdctl does not allow `-d` and `--rm` together).
 - **Makefile**: See repo root `Makefile`; optional `.env` for `TARGET_ARCH`, `GH_OWNER`, `GH_TOKEN`. `TARGET_ARCH` auto-detected from host if unset.

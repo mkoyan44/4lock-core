@@ -1,6 +1,6 @@
 # Cursor Rules for 4lock-core
 
-This file references Cursor resources in `.cursor/`. Rules and docs are adapted from 4lock-agent and instantiated for 4lock-core (Linux-only Rust workspace: blob, container, vappc).
+This file references Cursor resources in `.cursor/`. Rules and docs are adapted from 4lock-agent and instantiated for 4lock-core (Linux-only Rust workspace: blob, container, vapp_core).
 
 ## Directory structure
 
@@ -14,7 +14,7 @@ This file references Cursor resources in `.cursor/`. Rules and docs are adapted 
 ## Key rules
 
 1. **Always consult `.cursor/docs/` and `.cursor/rules/`** before making changes.
-2. **Crate placement**: blob (registry/cache), container (OCI/CRI/bootstrap), vappc (daemon/protocol/client). See `.cursor/docs/01-crate-architecture.md`.
+2. **Crate placement**: blob (registry/cache), container (OCI/CRI/bootstrap), vapp_core (daemon/protocol/client). See `.cursor/docs/01-crate-architecture.md`.
 3. **Build/run**: On Linux use Cargo or Makefile; on other hosts use `make` (containerized). Default `make` = build then run. `make run` uses detached container + `logs -f`; Ctrl+C stops and removes the container and exits. See `.cursor/docs/05-development-guide.md`.
 4. **Bootstrap**: Tasks must be idempotent; validate template variables. See `.cursor/rules/05-architecture-usage.mdc`.
 

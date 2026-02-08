@@ -1,4 +1,4 @@
-//! Minimal wire protocol for vappc daemon (4lock-core). No dependency on 4lock-agent.
+//! Minimal wire protocol for vapp-core daemon (4lock-core). No dependency on 4lock-agent.
 
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +9,7 @@ use container::intent::{
 /// Commands the minimal daemon accepts over the Unix socket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", content = "data")]
-pub enum VappcCommand {
+pub enum VappCoreCommand {
     /// Health check; daemon responds with OkUnit when ready to accept commands.
     Ping,
     Start {
@@ -37,7 +37,7 @@ pub enum VappcCommand {
 /// Response sent back to the client.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
-pub enum VappcResponse {
+pub enum VappCoreResponse {
     OkHandle(InstanceHandle),
     OkState(InstanceState),
     OkEndpoint(Endpoint),
@@ -46,33 +46,33 @@ pub enum VappcResponse {
     Err { message: String },
 }
 
-impl VappcResponse {
+impl VappCoreResponse {
     pub fn ok_handle(h: InstanceHandle) -> Self {
-        VappcResponse::OkHandle(h)
+        VappCoreResponse::OkHandle(h)
     }
     pub fn ok_state(s: InstanceState) -> Self {
-        VappcResponse::OkState(s)
+        VappCoreResponse::OkState(s)
     }
     pub fn ok_endpoint(e: Endpoint) -> Self {
-        VappcResponse::OkEndpoint(e)
+        VappCoreResponse::OkEndpoint(e)
     }
     pub fn ok_unit() -> Self {
-        VappcResponse::OkUnit
+        VappCoreResponse::OkUnit
     }
     pub fn ok_interface_ip(interface: String, ip: Option<String>) -> Self {
-        VappcResponse::OkInterfaceIp { interface, ip }
+        VappCoreResponse::OkInterfaceIp { interface, ip }
     }
     pub fn err(message: String) -> Self {
-        VappcResponse::Err { message }
+        VappCoreResponse::Err { message }
     }
 
     pub fn is_err(&self) -> bool {
-        matches!(self, VappcResponse::Err { .. })
+        matches!(self, VappCoreResponse::Err { .. })
     }
 
     pub fn error_message(&self) -> Option<&str> {
         match self {
-            VappcResponse::Err { message } => Some(message),
+            VappCoreResponse::Err { message } => Some(message),
             _ => None,
         }
     }

@@ -1,0 +1,46 @@
+# 4lock-core: build daemon + tests, run daemon in background, execute tests in one container.
+# Usage: make test-api-docker
+
+ARG TARGET_ARCH
+
+FROM --platform=linux/${TARGET_ARCH} rust:1-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    libssl-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+
+ENV RUST_MIN_STACK=16777216
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    set -e && \
+    cargo build -p vapp_core --bin vapp-core-daemon --release && \
+    cargo test -p vapp_core --test public_api --no-run --release && \
+    cp /app/target/release/vapp-core-daemon /app/out-daemon && \
+    mkdir -p /app/out-test && \
+    find /app/target/release/deps -maxdepth 1 -name 'public_api-*' ! -name '*.d' -executable -print0 | xargs -0 -I {} cp {} /app/out-test/public_api_test
+
+FROM --platform=linux/${TARGET_ARCH} debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    passt \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /root/.vapp /tmp/vapp-core
+
+COPY --from=builder /app/out-daemon /usr/local/bin/vapp-core-daemon
+COPY --from=builder /app/out-test/public_api_test /usr/local/bin/public_api_test
+RUN chmod +x /usr/local/bin/public_api_test
+
+COPY docker/entrypoints/docker-entrypoint-core-test.sh /usr/local/bin/entrypoint
+RUN chmod 0755 /usr/local/bin/entrypoint
+
+ENV RUST_LOG=info
+ENTRYPOINT ["/usr/local/bin/entrypoint"]

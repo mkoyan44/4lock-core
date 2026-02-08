@@ -1,17 +1,17 @@
-//! Example: connect to vappc-linux-daemon's exposed socket (Unix or VSOCK) and send a command.
+//! Example: connect to vapp-core-daemon's exposed socket (Unix or VSOCK) and send a command.
 //!
 //! Usage:
-//!   Unix socket (host or guest):  cargo run -p vappc --example connect_vappc_unix -- /path/to/socket.sock
-//!   Or set SOCKET env:            SOCKET=/tmp/vappc.sock cargo run -p vappc --example connect_vappc_unix
+//!   Unix socket (host or guest):  cargo test -p vapp_core connect_vappc_unix -- /path/to/socket.sock
+//!   Or set SOCKET env:            SOCKET=/tmp/vapp-core.sock cargo test -p vapp_core connect_vappc_unix
 //!
 //! The daemon exposes the socket when run as:
-//!   vappc-linux-daemon --socket /tmp/vappc.sock
-//!   vappc-linux-daemon --socket vsock:49163   (inside VM; use connect_vappc_vsock on Linux)
+//!   vapp-core-daemon --socket /tmp/vapp-core.sock
+//!   vapp-core-daemon --socket vsock:49163   (inside VM; use connect_vappc_vsock on Linux)
 
 use std::env;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use vappc::VappcCommand;
+use vapp_core::VappCoreCommand;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -21,11 +21,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .unwrap_or_else(|| {
             eprintln!("Usage: connect_vappc_unix <socket_path>");
             eprintln!("   or: SOCKET=/path/to.sock connect_vappc_unix");
-            eprintln!("Example: connect_vappc_unix /tmp/vappc.sock");
+            eprintln!("Example: connect_vappc_unix /tmp/vapp-core.sock");
             std::process::exit(1);
         });
 
-    let cmd = VappcCommand::GetState {
+    let cmd = VappCoreCommand::GetState {
         instance_id: "master-0".to_string(),
     };
     let request = serde_json::to_vec(&cmd)?;

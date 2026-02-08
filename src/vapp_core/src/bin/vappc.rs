@@ -1,9 +1,9 @@
-//! vappc-linux-daemon binary (4lock-core). Linux only. No dependency on 4lock-agent.
+//! vapp-core-daemon binary (4lock-core). Linux only. No dependency on 4lock-agent.
 //! Supports hot-reload: daemon watches its own binary and re-execs on change.
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
-    eprintln!("vappc-linux-daemon from 4lock-core is Linux-only. Use vapp on other platforms.");
+    eprintln!("vapp-core-daemon from 4lock-core is Linux-only. Use vapp on other platforms.");
     std::process::exit(1);
 }
 
@@ -15,7 +15,7 @@ fn main() {
     use std::path::PathBuf;
     use tokio::sync::mpsc;
     use tracing::info;
-    use vappc::daemon;
+    use vapp_core::daemon;
 
     /// Watch the daemon binary and re-exec when it changes (hot-reload via virtio-fs)
     async fn watch_binary_for_reload() {
@@ -71,13 +71,11 @@ fn main() {
     }
 
     #[derive(Parser, Debug)]
-    #[command(name = "vappc-linux-daemon", version, about = "vapp container daemon (4lock-core, Linux only)")]
+    #[command(name = "vapp-core-daemon", version, about = "vapp-core daemon (4lock-core, Linux only)")]
     struct Args {
 
 
-
-
-        #[arg(short = 's', long = "socket", default_value = "/tmp/vappc.sock")]
+        #[arg(short = 's', long = "socket", default_value = "/tmp/vapp-core.sock")]
         socket: String,
 
         #[arg(long = "app-dir", help = "App directory (default: ~/.vapp)")]
@@ -100,13 +98,13 @@ fn main() {
 
     // Always print startup banner (visible even without RUST_LOG)
     eprintln!("╔════════════════════════════════════════════════════════════════╗");
-    eprintln!("║  vappc-linux-daemon starting                                   ║");
+    eprintln!("║  vapp-core-daemon starting                                     ║");
     eprintln!("╚════════════════════════════════════════════════════════════════╝");
     eprintln!("  Socket: {}", args.socket);
     eprintln!("  App directory: {}", app_dir.display());
     eprintln!("  User: {} (UID {})", std::env::var("USER").unwrap_or_else(|_| "unknown".into()), unsafe { libc::getuid() });
 
-    info!("vappc-linux-daemon starting...");
+    info!("vapp-core-daemon starting...");
     info!("Socket: {}", args.socket);
     info!("App directory: {}", app_dir.display());
 
@@ -158,7 +156,7 @@ fn main() {
             eprintln!("  VSOCK listener: port {}", port);
             eprintln!("  TCP listener: {} (for SSH port-forward, e.g. ssh -L local:127.0.0.1:{})", tcp_addr, port);
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            eprintln!("  vappc-linux-daemon ready and listening! (Ctrl+C to exit)");
+            eprintln!("  vapp-core-daemon ready and listening! (Ctrl+C to exit)");
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             tokio::spawn(daemon::run_daemon_server_vsock(port, intent_tx.clone()));
             tokio::spawn(async move { daemon::run_daemon_server_tcp(&tcp_addr, intent_tx).await });
@@ -166,7 +164,7 @@ fn main() {
         } else {
             eprintln!("  Unix socket: {}", args.socket);
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            eprintln!("  vappc-linux-daemon ready and listening! (Ctrl+C to exit)");
+            eprintln!("  vapp-core-daemon ready and listening! (Ctrl+C to exit)");
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             let socket = args.socket.clone();
             tokio::spawn(async move { daemon::run_daemon_server(&socket, intent_tx).await });

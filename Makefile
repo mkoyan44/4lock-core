@@ -77,14 +77,22 @@ RUN_NAME := 4lock-core-run
 # --privileged required for network/user namespaces (pasta, rootless containers).
 run:
 	@-nerdctl rm -f $(RUN_NAME) 2>/dev/null || true
-	nerdctl run -d --name $(RUN_NAME) --privileged -v /tmp/vappc:/tmp ${IMAGE_NAME}:${IMAGE_TAG}
+	nerdctl run -d --name $(RUN_NAME) --privileged -v /tmp/vapp-core:/tmp ${IMAGE_NAME}:${IMAGE_TAG}
 	@trap 'nerdctl stop $(RUN_NAME) 2>/dev/null; nerdctl rm -f $(RUN_NAME) 2>/dev/null' INT TERM; nerdctl logs -f $(RUN_NAME); nerdctl stop $(RUN_NAME) 2>/dev/null || true; nerdctl rm -f $(RUN_NAME) 2>/dev/null || true
 
 run-dev:
 	@-nerdctl rm -f $(RUN_NAME) 2>/dev/null || true
-	nerdctl run -d --name $(RUN_NAME) --privileged -v /tmp/vappc:/tmp ${IMAGE_NAME}:dev
+	nerdctl run -d --name $(RUN_NAME) --privileged -v /tmp/vapp-core:/tmp ${IMAGE_NAME}:dev
 	@trap 'nerdctl stop $(RUN_NAME) 2>/dev/null; nerdctl rm -f $(RUN_NAME) 2>/dev/null' INT TERM; nerdctl logs -f $(RUN_NAME); nerdctl stop $(RUN_NAME) 2>/dev/null || true; nerdctl rm -f $(RUN_NAME) 2>/dev/null || true
 
 # From scratch: build then run (release image).
 from-scratch: build
 	$(MAKE) run
+
+# -----------------------------------------------------------------------------
+# Test
+# -----------------------------------------------------------------------------
+# Build test image, run one container: starts daemon in background, executes tests, exits.
+test:
+	nerdctl build -f docker/dockerfiles/Dockerfile.core.test $(COMPOSED_BUILD_ARGS) -t ${IMAGE_NAME}:test .
+	nerdctl run --rm --privileged ${IMAGE_NAME}:test

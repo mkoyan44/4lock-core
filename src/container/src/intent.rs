@@ -96,7 +96,7 @@ pub struct MountSpec {
 }
 
 /// Generic container run spec for ad-hoc/debug runs (image + cmd + args + env + mounts).
-/// Used with VappcCommand::RunContainer and RuntimeIntent::RunContainer.
+/// Used with VappCoreCommand::RunContainer and RuntimeIntent::RunContainer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerRunSpec {
     pub image: String,

@@ -1,7 +1,7 @@
-//! Minimal daemon server for vappc (4lock-core). Handles VappcCommand and forwards to container intent loop.
+//! Minimal daemon server for vapp-core (4lock-core). Handles VappCoreCommand and forwards to container intent loop.
 //! Supports Unix socket, VSOCK (--socket vsock:PORT), and TCP on loopback (for SSH port-forward from hosts without VSOCK, e.g. Windows).
 
-use crate::protocol::{VappcCommand, VappcResponse};
+use crate::protocol::{VappCoreCommand, VappCoreResponse};
 use container::intent::RuntimeIntent;
 use container::progress::RuntimeStartProgress;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -13,15 +13,15 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info};
 
-fn cmd_short_label(cmd: &VappcCommand) -> &'static str {
+fn cmd_short_label(cmd: &VappCoreCommand) -> &'static str {
     match cmd {
-        VappcCommand::Ping => "Ping",
-        VappcCommand::Start { .. } => "Start",
-        VappcCommand::RunContainer { .. } => "RunContainer",
-        VappcCommand::Stop { .. } => "Stop",
-        VappcCommand::GetState { .. } => "GetState",
-        VappcCommand::GetEndpoint { .. } => "GetEndpoint",
-        VappcCommand::GetInterfaceIp { .. } => "GetInterfaceIp",
+        VappCoreCommand::Ping => "Ping",
+        VappCoreCommand::Start { .. } => "Start",
+        VappCoreCommand::RunContainer { .. } => "RunContainer",
+        VappCoreCommand::Stop { .. } => "Stop",
+        VappCoreCommand::GetState { .. } => "GetState",
+        VappCoreCommand::GetEndpoint { .. } => "GetEndpoint",
+        VappCoreCommand::GetInterfaceIp { .. } => "GetInterfaceIp",
     }
 }
 
@@ -84,13 +84,13 @@ where
         let request = &buffer[..n];
         debug!("Daemon: request from {} ({} bytes)", peer, n);
 
-        let cmd: Result<VappcCommand, _> = serde_json::from_slice(request);
+        let cmd: Result<VappCoreCommand, _> = serde_json::from_slice(request);
         if let Ok(ref c) = cmd {
             info!("Daemon: command from {}: {}", peer, cmd_short_label(c));
         }
         let response = match cmd {
-            Ok(VappcCommand::Ping) => VappcResponse::ok_unit(),
-            Ok(VappcCommand::Start { spec }) => {
+            Ok(VappCoreCommand::Ping) => VappCoreResponse::ok_unit(),
+            Ok(VappCoreCommand::Start { spec }) => {
                 let (progress_tx, _progress_rx) = mpsc::channel::<RuntimeStartProgress>(4);
                 let (callback_tx, callback_rx) = oneshot::channel();
                 let intent = RuntimeIntent::Start {
@@ -99,16 +99,16 @@ where
                     callback: callback_tx,
                 };
                 if intent_tx.send(intent).await.is_err() {
-                    VappcResponse::err("Intent loop disconnected".to_string())
+                    VappCoreResponse::err("Intent loop disconnected".to_string())
                 } else {
                     match callback_rx.await {
-                        Ok(Ok(handle)) => VappcResponse::ok_handle(handle),
-                        Ok(Err(e)) => VappcResponse::err(e),
-                        Err(_) => VappcResponse::err("Intent loop dropped callback".to_string()),
+                        Ok(Ok(handle)) => VappCoreResponse::ok_handle(handle),
+                        Ok(Err(e)) => VappCoreResponse::err(e),
+                        Err(_) => VappCoreResponse::err("Intent loop dropped callback".to_string()),
                     }
                 }
             }
-            Ok(VappcCommand::RunContainer { spec }) => {
+            Ok(VappCoreCommand::RunContainer { spec }) => {
                 let (progress_tx, _progress_rx) = mpsc::channel::<RuntimeStartProgress>(4);
                 let (callback_tx, callback_rx) = oneshot::channel();
                 let intent = RuntimeIntent::RunContainer {
@@ -117,63 +117,63 @@ where
                     callback: callback_tx,
                 };
                 if intent_tx.send(intent).await.is_err() {
-                    VappcResponse::err("Intent loop disconnected".to_string())
+                    VappCoreResponse::err("Intent loop disconnected".to_string())
                 } else {
                     match callback_rx.await {
-                        Ok(Ok(handle)) => VappcResponse::ok_handle(handle),
-                        Ok(Err(e)) => VappcResponse::err(e),
-                        Err(_) => VappcResponse::err("Intent loop dropped callback".to_string()),
+                        Ok(Ok(handle)) => VappCoreResponse::ok_handle(handle),
+                        Ok(Err(e)) => VappCoreResponse::err(e),
+                        Err(_) => VappCoreResponse::err("Intent loop dropped callback".to_string()),
                     }
                 }
             }
-            Ok(VappcCommand::Stop { instance_id }) => {
+            Ok(VappCoreCommand::Stop { instance_id }) => {
                 let intent = RuntimeIntent::Stop { instance_id };
                 if intent_tx.send(intent).await.is_err() {
-                    VappcResponse::err("Intent loop disconnected".to_string())
+                    VappCoreResponse::err("Intent loop disconnected".to_string())
                 } else {
-                    VappcResponse::ok_unit()
+                    VappCoreResponse::ok_unit()
                 }
             }
-            Ok(VappcCommand::GetState { instance_id }) => {
+            Ok(VappCoreCommand::GetState { instance_id }) => {
                 let (reply_tx, mut reply_rx) = mpsc::channel::<container::intent::InstanceState>(1);
                 let intent = RuntimeIntent::GetState {
                     instance_id,
                     reply: reply_tx,
                 };
                 if intent_tx.send(intent).await.is_err() {
-                    VappcResponse::err("Intent loop disconnected".to_string())
+                    VappCoreResponse::err("Intent loop disconnected".to_string())
                 } else {
                     match reply_rx.recv().await {
-                        Some(state) => VappcResponse::ok_state(state),
-                        None => VappcResponse::err("Intent loop did not reply".to_string()),
+                        Some(state) => VappCoreResponse::ok_state(state),
+                        None => VappCoreResponse::err("Intent loop did not reply".to_string()),
                     }
                 }
             }
-            Ok(VappcCommand::GetEndpoint { instance_id }) => {
+            Ok(VappCoreCommand::GetEndpoint { instance_id }) => {
                 let (callback_tx, callback_rx) = oneshot::channel();
                 let intent = RuntimeIntent::GetEndpoint {
                     instance_id,
                     callback: callback_tx,
                 };
                 if intent_tx.send(intent).await.is_err() {
-                    VappcResponse::err("Intent loop disconnected".to_string())
+                    VappCoreResponse::err("Intent loop disconnected".to_string())
                 } else {
                     match callback_rx.await {
-                        Ok(Ok(ep)) => VappcResponse::ok_endpoint(ep),
-                        Ok(Err(e)) => VappcResponse::err(e),
-                        Err(_) => VappcResponse::err("Intent loop dropped callback".to_string()),
+                        Ok(Ok(ep)) => VappCoreResponse::ok_endpoint(ep),
+                        Ok(Err(e)) => VappCoreResponse::err(e),
+                        Err(_) => VappCoreResponse::err("Intent loop dropped callback".to_string()),
                     }
                 }
             }
-            Ok(VappcCommand::GetInterfaceIp { interface }) => {
+            Ok(VappCoreCommand::GetInterfaceIp { interface }) => {
                 match get_interface_ip(&interface) {
-                    Ok(ip) => VappcResponse::ok_interface_ip(interface, Some(ip)),
-                    Err(_) => VappcResponse::ok_interface_ip(interface, None),
+                    Ok(ip) => VappCoreResponse::ok_interface_ip(interface, Some(ip)),
+                    Err(_) => VappCoreResponse::ok_interface_ip(interface, None),
                 }
             }
             Err(e) => {
                 error!("Daemon: invalid command JSON: {}", e);
-                VappcResponse::err(format!("Invalid command: {}", e))
+                VappCoreResponse::err(format!("Invalid command: {}", e))
             }
         };
 
@@ -181,7 +181,7 @@ where
             Ok(b) => b,
             Err(e) => {
                 error!("Daemon: failed to serialize response: {}", e);
-                serde_json::to_vec(&VappcResponse::err(e.to_string())).unwrap_or_default()
+                serde_json::to_vec(&VappCoreResponse::err(e.to_string())).unwrap_or_default()
             }
         };
         if let Err(e) = stream.write_all(&serialized).await {
@@ -201,8 +201,8 @@ pub async fn run_daemon_server(
     {
         let _ = std::fs::remove_file(socket_path);
         let listener = UnixListener::bind(socket_path)?;
-        info!("vappc daemon listening on {}", socket_path);
-        eprintln!("vappc daemon listening on {}", socket_path);
+        info!("vapp-core daemon listening on {}", socket_path);
+        eprintln!("vapp-core daemon listening on {}", socket_path);
 
         loop {
             match listener.accept().await {
@@ -239,8 +239,8 @@ pub async fn run_daemon_server_tcp(
     intent_tx: mpsc::Sender<RuntimeIntent>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    info!("vappc daemon listening on TCP {}", addr);
-    eprintln!("vappc daemon listening on TCP {} (for SSH port-forward)", addr);
+    info!("vapp-core daemon listening on TCP {}", addr);
+    eprintln!("vapp-core daemon listening on TCP {} (for SSH port-forward)", addr);
 
     loop {
         match listener.accept().await {
@@ -268,8 +268,8 @@ pub async fn run_daemon_server_vsock(
 
     const VMADDR_CID_ANY: u32 = 0xFFFFFFFF;
     let mut listener = VsockListener::bind(VMADDR_CID_ANY, port)?;
-    info!("vappc daemon listening on VSOCK port {}", port);
-    eprintln!("vappc daemon listening on VSOCK port {}", port);
+    info!("vapp-core daemon listening on VSOCK port {}", port);
+    eprintln!("vapp-core daemon listening on VSOCK port {}", port);
 
     loop {
         match listener.accept().await {

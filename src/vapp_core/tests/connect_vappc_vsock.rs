@@ -1,11 +1,11 @@
-//! Example: connect to vappc-linux-daemon's VSOCK port (Linux only, e.g. from inside the VM).
+//! Example: connect to vapp-core-daemon's VSOCK port (Linux only, e.g. from inside the VM).
 //!
 //! Usage:
-//!   cargo run -p vappc --example connect_vappc_vsock -- 49163
-//!   Or set PORT env:  PORT=49163 cargo run -p vappc --example connect_vappc_vsock
+//!   cargo test -p vapp_core connect_vappc_vsock -- 49163
+//!   Or set PORT env:  PORT=49163 cargo test -p vapp_core connect_vappc_vsock
 //!
 //! The daemon listens on VSOCK when run as:
-//!   vappc-linux-daemon --socket vsock:49163 --app-dir /home/user/.4lock-agent
+//!   vapp-core-daemon --socket vsock:49163 --app-dir /home/user/.4lock-agent
 
 #![cfg(target_os = "linux")]
 
@@ -13,7 +13,7 @@ use std::env;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_vsock::VsockStream;
-use vappc::VappcCommand;
+use vapp_core::VappCoreCommand;
 
 const VMADDR_CID_LOCAL: u32 = 1;
 
@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(49163);
 
-    let cmd = VappcCommand::GetState {
+    let cmd = VappCoreCommand::GetState {
         instance_id: "master-0".to_string(),
     };
     let request = serde_json::to_vec(&cmd)?;
