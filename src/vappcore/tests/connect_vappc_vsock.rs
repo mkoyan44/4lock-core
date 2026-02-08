@@ -1,8 +1,8 @@
 //! Example: connect to vapp-core-daemon's VSOCK port (Linux only, e.g. from inside the VM).
 //!
 //! Usage:
-//!   cargo test -p vapp_core connect_vappc_vsock -- 49163
-//!   Or set PORT env:  PORT=49163 cargo test -p vapp_core connect_vappc_vsock
+//!   cargo test -p vappcore connect_vappc_vsock -- 49163
+//!   Or set PORT env:  PORT=49163 cargo test -p vappcore connect_vappc_vsock
 //!
 //! The daemon listens on VSOCK when run as:
 //!   vapp-core-daemon --socket vsock:49163 --app-dir /home/user/.4lock-agent
@@ -13,7 +13,7 @@ use std::env;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_vsock::VsockStream;
-use vapp_core::VappCoreCommand;
+use vappcore::VappCoreCommand;
 
 const VMADDR_CID_LOCAL: u32 = 1;
 

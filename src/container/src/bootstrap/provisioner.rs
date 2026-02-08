@@ -118,16 +118,19 @@ impl ContainerProvisioner {
             let utility_runner = UtilityRunner::new(app_dir.clone(), container_manager.clone());
             tracing::debug!("[ContainerProvisioner] UtilityRunner initialized");
 
-            // Initialize template renderer
-            // Templates are embedded in the crate source directory
-            let templates_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("src/bootstrap/templates");
-            tracing::debug!(
-                "[ContainerProvisioner] Initializing TemplateRenderer with templates dir: {}",
-                templates_dir.display()
-            );
-            let template_renderer = TemplateRenderer::new(templates_dir)
-                .map_err(|e| format!("Failed to initialize template renderer: {}", e))?;
+            // Initialize template renderer from embedded templates (self-contained binary).
+            // Use VAPPC_TEMPLATES_DIR for local development to load from filesystem instead.
+            let template_renderer = if let Ok(dir) = std::env::var("VAPPC_TEMPLATES_DIR") {
+                let templates_dir = std::path::PathBuf::from(dir);
+                tracing::debug!(
+                    "[ContainerProvisioner] Initializing TemplateRenderer from VAPPC_TEMPLATES_DIR: {}",
+                    templates_dir.display()
+                );
+                TemplateRenderer::new(templates_dir)
+            } else {
+                TemplateRenderer::from_embedded()
+            }
+            .map_err(|e| format!("Failed to initialize template renderer: {}", e))?;
 
             tracing::info!("[ContainerProvisioner] Initialized successfully");
 

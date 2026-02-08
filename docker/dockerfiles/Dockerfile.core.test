@@ -20,8 +20,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
     set -e && \
-    cargo build -p vapp_core --bin vapp-core-daemon --release && \
-    cargo test -p vapp_core --test public_api --no-run --release && \
+    cargo build -p vappcore --bin vapp-core-daemon --release && \
+    cargo test -p vappcore --test public_api --no-run --release && \
     cp /app/target/release/vapp-core-daemon /app/out-daemon && \
     mkdir -p /app/out-test && \
     find /app/target/release/deps -maxdepth 1 -name 'public_api-*' ! -name '*.d' -executable -print0 | xargs -0 -I {} cp {} /app/out-test/public_api_test

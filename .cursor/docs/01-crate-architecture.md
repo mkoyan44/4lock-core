@@ -54,11 +54,11 @@ This document describes the internal layout of each crate in the 4lock-core work
 
 ---
 
-## 3. src/vapp_core – Daemon and Client
+## 3. src/vappcore – Daemon and Client
 
 **Purpose**: vapp-core daemon (Unix/VSOCK socket server) and client library. This is the API that 4lock-agent uses on Linux to control the core (start/stop containers, bootstrap, etc.).
 
-**Location**: `src/vapp_core/`
+**Location**: `src/vappcore/`
 
 ### Notable modules
 
@@ -72,7 +72,7 @@ This document describes the internal layout of each crate in the 4lock-core work
 
 ### Integration
 
-- 4lock-agent links the vapp_core **client** crate and, on Linux, runs or embeds **vapp-core-daemon** (from this repo). Socket default: `/tmp/vapp-core.sock` (or `/run/vapp/vapp-core.sock` under systemd).
+- 4lock-agent links the vappcore **client** crate and, on Linux, runs or embeds **vapp-core-daemon** (from this repo). Socket default: `/tmp/vapp-core.sock` (or `/run/vapp/vapp-core.sock` under systemd).
 
 ---
 
@@ -82,7 +82,7 @@ This document describes the internal layout of each crate in the 4lock-core work
 |-------------------|------------|----------------------------------------------------|
 | Registry / cache  | blob       | Proxy, cache, prepull                              |
 | OCI / CRI / K8s   | container  | Rootless runtime, CRI server, bootstrap, intents  |
-| Daemon / protocol | vapp_core  | Socket API, daemon, client                         |
+| Daemon / protocol | vappcore  | Socket API, daemon, client                         |
 | Build / run       | Makefile   | nerdctl, Dockerfile.core, TARGET_ARCH              |
 
-When adding features: place registry/cache logic in blob; OCI/CRI/bootstrap in container; daemon protocol and client in vapp_core. Keep shared types in the crate that owns the concept or in a small `common`-style module within that crate.
+When adding features: place registry/cache logic in blob; OCI/CRI/bootstrap in container; daemon protocol and client in vappcore. Keep shared types in the crate that owns the concept or in a small `common`-style module within that crate.

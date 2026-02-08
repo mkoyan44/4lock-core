@@ -1,18 +1,18 @@
-//! Public API tests for vapp_core.
+//! Public API tests for vappcore.
 //!
 //! Unit tests (protocol serialization) run without a daemon.
 //! Integration tests (client/stream/ping) require a running daemon and socket.
 //!
 //! Run integration tests with daemon:
 //!   make run-dev   # in one terminal (or background)
-//!   VAPPC_CORE_TEST_SOCKET=/tmp/vapp-core/vapp-core.sock cargo test -p vapp_core public_api
+//!   VAPPC_CORE_TEST_SOCKET=/tmp/vapp-core/vapp-core.sock cargo test -p vappcore public_api
 //!
 //! Or skip integration tests (unit tests only):
-//!   cargo test -p vapp_core public_api -- --skip stream_ping --skip ping_call
+//!   cargo test -p vappcore public_api -- --skip stream_ping --skip ping_call
 
 use std::path::PathBuf;
 
-use vapp_core::{VappCoreCommand, VappCorePing, VappCoreResponse, VappCoreStream};
+use vappcore::{VappCoreCommand, VappCorePing, VappCoreResponse, VappCoreStream};
 
 fn test_socket() -> Option<PathBuf> {
     let p = std::env::var("VAPPC_CORE_TEST_SOCKET")

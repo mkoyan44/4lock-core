@@ -15,7 +15,7 @@ fn main() {
     use std::path::PathBuf;
     use tokio::sync::mpsc;
     use tracing::info;
-    use vapp_core::daemon;
+    use vappcore::daemon;
 
     /// Watch the daemon binary and re-exec when it changes (hot-reload via virtio-fs)
     async fn watch_binary_for_reload() {
@@ -117,11 +117,32 @@ fn main() {
 
     std::fs::create_dir_all(&app_dir).expect("create app_dir");
 
+    // Create blob cache dir (docker-proxy needs this for image pull-through cache)
+    let blob_cache_dir = app_dir.join("blob-cache");
+    std::fs::create_dir_all(&blob_cache_dir).expect("create blob-cache dir");
+
     // Create runtime FIRST, then spawn tasks within it
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
     let result: anyhow::Result<()> = rt.block_on(async {
         let (intent_tx, intent_rx) = mpsc::channel(32);
+
+        // Spawn blob (docker-proxy) server - required for image pulls (alpine, K8s images, etc.)
+        let blob_cache = blob_cache_dir.clone();
+        tokio::spawn(async move {
+            use blob::{start_server, Config};
+            match start_server(blob_cache, Config::default(), None, None).await {
+                Ok(handle) => {
+                    eprintln!("  Blob (docker-proxy): listening on 0.0.0.0:5050");
+                    info!("Blob (docker-proxy) server started on 0.0.0.0:5050");
+                    let _ = handle.await;
+                }
+                Err(e) => {
+                    tracing::error!("Blob (docker-proxy) failed to start: {}", e);
+                    eprintln!("  Blob (docker-proxy): FAILED - {}", e);
+                }
+            }
+        });
 
         // Spawn hot-reload watcher (watches binary via virtio-fs mount)
         tokio::spawn(watch_binary_for_reload());

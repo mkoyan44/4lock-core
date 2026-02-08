@@ -1,5 +1,5 @@
 [package]
-name = "vapp_core"
+name = "vappcore"
 version = "0.1.0"
 edition = "2021"
 description = "vapp-core: daemon and client for 4lock-core. No dependency on 4lock-agent."
@@ -16,6 +16,7 @@ name = "vapp-core-daemon"
 path = "src/bin/vappc.rs"
 
 [dependencies]
+blob = { path = "../blob" }
 container = { path = "../container" }
 
 clap = { version = "4", features = ["derive"] }

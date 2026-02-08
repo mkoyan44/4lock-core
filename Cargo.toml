@@ -1,4 +1,4 @@
-# Daemon package: root "daemon" depends on blob, container, vapp_core (all necessary info here).
+# Daemon package: root "daemon" depends on blob, container, vappcore (all necessary info here).
 # Build from repo root: cargo build -p daemon
 # Build from daemon dir: cargo build --manifest-path daemon/Cargo.toml (profiles/patch below apply)
 # Cross: daemon/Cross.toml (used by publish when building Linux binaries)
@@ -7,7 +7,7 @@
 name = "daemon"
 version = "0.1.0"
 edition = "2021"
-description = "4lock-core daemon workspace root (blob, container, vapp_core)"
+description = "4lock-core daemon workspace root (blob, container, vappcore)"
 
 [lib]
 path = "src/lib.rs"
@@ -15,7 +15,7 @@ path = "src/lib.rs"
 [dependencies]
 blob = { path = "src/blob" }
 container = { path = "src/container" }
-vapp_core = { path = "src/vapp_core" }
+vappcore = { path = "src/vappcore" }
 
 [profile.release]
 panic = "abort"

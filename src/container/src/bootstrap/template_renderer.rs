@@ -1,5 +1,6 @@
 /// Template renderer using Tera for Jinja2-style template rendering
 /// Supports full Jinja2 syntax: variables, conditionals, loops, filters
+use super::embedded_templates;
 use crate::provisioner::ProvisionError;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,7 +29,41 @@ pub struct TemplateRenderer {
 }
 
 impl TemplateRenderer {
-    /// Create a new TemplateRenderer with Tera engine
+    /// Create a TemplateRenderer from embedded templates (compiled into the binary).
+    /// Use this for production - the daemon is self-contained and works when only
+    /// the binary is available (e.g. inside a VM with virtio-fs share containing
+    /// only the binary).
+    pub fn from_embedded() -> Result<Self, ProvisionError> {
+        tracing::debug!("[TemplateRenderer] Initializing Tera from embedded templates");
+
+        let mut tera = Tera::default();
+        let mut template_count = 0;
+
+        for (name, content) in embedded_templates::ALL_TEMPLATES {
+            if let Err(e) = tera.add_raw_template(name, content) {
+                tracing::warn!(
+                    "[TemplateRenderer] Failed to add embedded template {}: {}",
+                    name,
+                    e
+                );
+            } else {
+                template_count += 1;
+                tracing::debug!("[TemplateRenderer] Loaded embedded template: {}", name);
+            }
+        }
+
+        tracing::info!(
+            "[TemplateRenderer] Loaded {} embedded templates",
+            template_count
+        );
+
+        Ok(Self {
+            tera,
+            templates_dir: PathBuf::from("(embedded)"),
+        })
+    }
+
+    /// Create a new TemplateRenderer from filesystem (for local development/tests).
     pub fn new(templates_dir: PathBuf) -> Result<Self, ProvisionError> {
         tracing::debug!(
             "[TemplateRenderer] Initializing Tera with templates_dir: {}",

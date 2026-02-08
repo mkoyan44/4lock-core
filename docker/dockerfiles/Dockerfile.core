@@ -33,10 +33,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
     set -e && \
     if [ "$BUILD_PROFILE" = "dev" ]; then \
-      cargo build --profile dev-fast -p vapp_core --bin vapp-core-daemon && \
+      cargo build --profile dev-fast -p vappcore --bin vapp-core-daemon && \
       cp /app/target/dev-fast/vapp-core-daemon /app/out/; \
     else \
-      cargo build --release -p vapp_core --bin vapp-core-daemon && \
+      cargo build --release -p vappcore --bin vapp-core-daemon && \
       cp /app/target/release/vapp-core-daemon /app/out/; \
     fi
 

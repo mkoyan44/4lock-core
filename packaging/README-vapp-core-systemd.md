@@ -50,12 +50,12 @@ Then log out and back in (or `newgrp vapp`).
 
 ## Install (Ansible, 4lock-de)
 
-From 4lock-de repo, run the playbook (optionally set `vapp_core_binary_src` to the built binary path; playbook may use `vappc_binary_src` until 4lock-de is updated):
+From 4lock-de repo, run the playbook (optionally set `vappcore_binary_src` to the built binary path; playbook may use `vappc_binary_src` until 4lock-de is updated):
 
 ```bash
 ansible-playbook -i clusters/production-onprem-shared/ansible/inventory.ini \
   clusters/production-onprem-shared/ansible/playbooks/vappc-daemon.yml \
-  -e vapp_core_binary_src=/path/to/vapp-core-daemon
+  -e vappcore_binary_src=/path/to/vapp-core-daemon
 ```
 
 If the binary path var is omitted, the binary must already be present at `/usr/local/lib/4lock/vapp-core-daemon`.

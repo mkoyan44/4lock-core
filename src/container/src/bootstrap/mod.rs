@@ -3,6 +3,7 @@
 /// This module provides the container-specific bootstrap implementation,
 /// handling images, volumes, and container lifecycle.
 pub mod config;
+pub mod embedded_templates;
 pub mod image_manager;
 pub mod intent_loop;
 pub mod k8s_components;

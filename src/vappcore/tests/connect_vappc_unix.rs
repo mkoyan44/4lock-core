@@ -1,8 +1,8 @@
 //! Example: connect to vapp-core-daemon's exposed socket (Unix or VSOCK) and send a command.
 //!
 //! Usage:
-//!   Unix socket (host or guest):  cargo test -p vapp_core connect_vappc_unix -- /path/to/socket.sock
-//!   Or set SOCKET env:            SOCKET=/tmp/vapp-core.sock cargo test -p vapp_core connect_vappc_unix
+//!   Unix socket (host or guest):  cargo test -p vappcore connect_vappc_unix -- /path/to/socket.sock
+//!   Or set SOCKET env:            SOCKET=/tmp/vapp-core.sock cargo test -p vappcore connect_vappc_unix
 //!
 //! The daemon exposes the socket when run as:
 //!   vapp-core-daemon --socket /tmp/vapp-core.sock
@@ -11,7 +11,7 @@
 use std::env;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use vapp_core::VappCoreCommand;
+use vappcore::VappCoreCommand;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

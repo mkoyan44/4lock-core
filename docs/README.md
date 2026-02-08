@@ -8,18 +8,18 @@ This repository is consumed by [4lock-agent](https://github.com/4lock/4lock-agen
 
 - **src/blob** – Docker/OCI registry proxy server (image pull cache).
 - **src/container** – Linux rootless OCI container runtime, CRI server, bootstrap, and provisioning.
-- **src/vapp_core** – vapp-core daemon and client library; provides the Unix/VSOCK/TCP socket API used by 4lock-agent on Linux.
+- **src/vappcore** – vapp-core daemon and client library; provides the Unix/VSOCK/TCP socket API used by 4lock-agent on Linux.
 
 ## Building
 
 **Requires Linux.** Build from repo root:
 
 ```bash
-# All daemon crates (blob, container, vapp_core)
+# All daemon crates (blob, container, vappcore)
 cargo build -p daemon
 
 # vapp-core-daemon binary only
-cargo build -p vapp_core --release --bin vapp-core-daemon
+cargo build -p vappcore --release --bin vapp-core-daemon
 ```
 
 Output: `target/release/vapp-core-daemon`. On non-Linux hosts use the Makefile (builds inside a Linux container via nerdctl).
@@ -54,7 +54,7 @@ Without `GH_OWNER` in `.env`, image is tagged `4lock-core:latest` for local run.
 
 ## 4lock-agent integration
 
-4lock-agent depends on the **vapp_core** crate (client library) and, when building the agent, builds **vapp-core-daemon** from this repo and embeds it for Linux VMs/containers.
+4lock-agent depends on the **vappcore** crate (client library) and, when building the agent, builds **vapp-core-daemon** from this repo and embeds it for Linux VMs/containers.
 
 - Clone 4lock-core next to 4lock-agent (e.g. `platform/4lock-agent` and `platform/4lock-core`).
 - Or set `LOCK4_CORE_DIR` to the path to 4lock-core when building 4lock-agent.
