@@ -5,5 +5,6 @@ pub mod daemon;
 pub mod protocol;
 
 pub use client::{VappCorePing, VappCoreStream};
-pub use daemon::run_daemon_server;
-pub use protocol::{VappCoreCommand, VappCoreResponse};
+pub use protocol::{
+    ErrorCategory, ResponseData, VappCoreCommand, WireError, WireMessage,
+};

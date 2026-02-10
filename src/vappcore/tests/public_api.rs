@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use vappcore::{VappCoreCommand, VappCorePing, VappCoreResponse, VappCoreStream};
+use vappcore::{VappCoreCommand, VappCorePing, VappCoreStream, WireError, WireMessage};
 
 fn test_socket() -> Option<PathBuf> {
     let p = std::env::var("VAPPC_CORE_TEST_SOCKET")
@@ -63,21 +63,26 @@ fn protocol_command_get_state_roundtrip() {
 
 #[test]
 fn protocol_response_ok_unit_roundtrip() {
-    let r = VappCoreResponse::ok_unit();
+    let r = WireMessage::ok_unit();
     let json = serde_json::to_string(&r).unwrap();
-    let back: VappCoreResponse = serde_json::from_str(&json).unwrap();
-    assert!(!back.is_err());
+    let back: WireMessage = serde_json::from_str(&json).unwrap();
+    assert!(back.is_terminal());
+    assert!(matches!(back, WireMessage::Ok { .. }));
 }
 
 #[test]
 fn protocol_response_err_roundtrip() {
-    let r = VappCoreResponse::err("test error".to_string());
-    assert!(r.is_err());
-    assert_eq!(r.error_message(), Some("test error"));
+    let r = WireMessage::err(WireError::internal("test error".to_string()));
     let json = serde_json::to_string(&r).unwrap();
-    let back: VappCoreResponse = serde_json::from_str(&json).unwrap();
-    assert!(back.is_err());
-    assert_eq!(back.error_message(), Some("test error"));
+    let back: WireMessage = serde_json::from_str(&json).unwrap();
+    assert!(back.is_terminal());
+    match back {
+        WireMessage::Error(e) => {
+            assert_eq!(e.message, "test error");
+            assert!(!e.is_retryable);
+        }
+        _ => panic!("expected Error"),
+    }
 }
 
 // -----------------------------------------------------------------------------

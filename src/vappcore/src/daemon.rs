@@ -1,10 +1,16 @@
-//! Minimal daemon server for vapp-core (4lock-core). Handles VappCoreCommand and forwards to container intent loop.
-//! Supports Unix socket, VSOCK (--socket vsock:PORT), and TCP on loopback (for SSH port-forward from hosts without VSOCK, e.g. Windows).
+//! Daemon server for vapp-core (4lock-core). Handles VappCoreCommand via NDJSON and forwards to container intent loop.
+//! Supports Unix socket, VSOCK (--socket vsock:PORT), and TCP on loopback.
+//!
+//! ## Wire Format
+//!
+//! NDJSON (newline-delimited JSON). Each request/response is one JSON line terminated by `\n`.
+//! For streaming commands (Start, RunContainer), the daemon sends zero or more `Progress` lines
+//! followed by exactly one terminal `Ok` or `Error` line.
 
-use crate::protocol::{VappCoreCommand, VappCoreResponse};
+use crate::protocol::{VappCoreCommand, WireError, WireMessage};
 use container::intent::RuntimeIntent;
 use container::progress::RuntimeStartProgress;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[cfg(unix)]
 use tokio::net::UnixListener;
 #[cfg(target_os = "linux")]
@@ -65,33 +71,63 @@ fn get_interface_ip(_interface: &str) -> Result<String, String> {
     Err("GetInterfaceIp only supported on Linux".to_string())
 }
 
-/// Handle multiple requests on the same connection (read → parse → respond → write) until read returns 0 or error.
-/// This allows the host to send Ping then Start over one VSOCK connection without the guest closing after Ping.
-async fn handle_client<S>(mut stream: S, peer: String, intent_tx: mpsc::Sender<RuntimeIntent>)
+/// Write one NDJSON line to an async writer.
+async fn write_ndjson_async<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    msg: &WireMessage,
+) -> Result<(), String> {
+    let json = serde_json::to_string(msg).map_err(|e| format!("Serialize: {}", e))?;
+    writer
+        .write_all(json.as_bytes())
+        .await
+        .map_err(|e| format!("Write: {}", e))?;
+    writer
+        .write_all(b"\n")
+        .await
+        .map_err(|e| format!("Write newline: {}", e))?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| format!("Flush: {}", e))?;
+    Ok(())
+}
+
+/// Handle multiple requests on the same connection (NDJSON: read line → parse → respond → write line).
+/// For Start/RunContainer: streams progress messages before the final response.
+async fn handle_client<S>(stream: S, peer: String, intent_tx: mpsc::Sender<RuntimeIntent>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
 {
-    let mut buffer = vec![0u8; 65536];
+    let (reader_half, mut writer_half) = tokio::io::split(stream);
+    let mut reader = BufReader::new(reader_half);
+    let mut line_buf = String::new();
+
     loop {
-        let n = match stream.read(&mut buffer).await {
-            Ok(0) => break,
+        line_buf.clear();
+        let n = match reader.read_line(&mut line_buf).await {
+            Ok(0) => break, // Client closed connection
             Ok(n) => n,
             Err(e) => {
                 error!("Daemon: read error from {}: {}", peer, e);
                 break;
             }
         };
-        let request = &buffer[..n];
         debug!("Daemon: request from {} ({} bytes)", peer, n);
 
-        let cmd: Result<VappCoreCommand, _> = serde_json::from_slice(request);
+        let cmd: Result<VappCoreCommand, _> = serde_json::from_str(line_buf.trim_end());
         if let Ok(ref c) = cmd {
             info!("Daemon: command from {}: {}", peer, cmd_short_label(c));
         }
-        let response = match cmd {
-            Ok(VappCoreCommand::Ping) => VappCoreResponse::ok_unit(),
+
+        match cmd {
+            Ok(VappCoreCommand::Ping) => {
+                if let Err(e) = write_ndjson_async(&mut writer_half, &WireMessage::ok_unit()).await {
+                    error!("Daemon: failed to send Ping response to {}: {}", peer, e);
+                    break;
+                }
+            }
             Ok(VappCoreCommand::Start { spec }) => {
-                let (progress_tx, _progress_rx) = mpsc::channel::<RuntimeStartProgress>(4);
+                let (progress_tx, mut progress_rx) = mpsc::channel::<RuntimeStartProgress>(32);
                 let (callback_tx, callback_rx) = oneshot::channel();
                 let intent = RuntimeIntent::Start {
                     spec: Box::new(spec),
@@ -99,17 +135,51 @@ where
                     callback: callback_tx,
                 };
                 if intent_tx.send(intent).await.is_err() {
-                    VappCoreResponse::err("Intent loop disconnected".to_string())
-                } else {
-                    match callback_rx.await {
-                        Ok(Ok(handle)) => VappCoreResponse::ok_handle(handle),
-                        Ok(Err(e)) => VappCoreResponse::err(e),
-                        Err(_) => VappCoreResponse::err("Intent loop dropped callback".to_string()),
+                    let msg = WireMessage::err(WireError::internal("Intent loop disconnected".into()));
+                    let _ = write_ndjson_async(&mut writer_half, &msg).await;
+                    continue;
+                }
+
+                // Stream progress and wait for final result using select!
+                let mut callback_future = callback_rx;
+                let final_msg = loop {
+                    tokio::select! {
+                        progress = progress_rx.recv() => {
+                            if let Some(p) = progress {
+                                let msg = WireMessage::progress(
+                                    p.percentage,
+                                    p.message,
+                                    p.phase,
+                                    p.instance_name,
+                                    p.task_name,
+                                );
+                                if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
+                                    error!("Daemon: failed to send progress to {}: {}", peer, e);
+                                    break WireMessage::err(WireError::internal(
+                                        format!("Failed to send progress: {}", e),
+                                    ));
+                                }
+                            }
+                            // progress channel closed — keep waiting for callback
+                        }
+                        result = &mut callback_future => {
+                            break match result {
+                                Ok(Ok(handle)) => WireMessage::ok_handle(handle),
+                                Ok(Err(e)) => WireMessage::err_string(e),
+                                Err(_) => WireMessage::err(WireError::internal(
+                                    "Intent loop dropped callback".into(),
+                                )),
+                            };
+                        }
                     }
+                };
+                if let Err(e) = write_ndjson_async(&mut writer_half, &final_msg).await {
+                    error!("Daemon: failed to send Start response to {}: {}", peer, e);
+                    break;
                 }
             }
             Ok(VappCoreCommand::RunContainer { spec }) => {
-                let (progress_tx, _progress_rx) = mpsc::channel::<RuntimeStartProgress>(4);
+                let (progress_tx, mut progress_rx) = mpsc::channel::<RuntimeStartProgress>(32);
                 let (callback_tx, callback_rx) = oneshot::channel();
                 let intent = RuntimeIntent::RunContainer {
                     spec,
@@ -117,21 +187,48 @@ where
                     callback: callback_tx,
                 };
                 if intent_tx.send(intent).await.is_err() {
-                    VappCoreResponse::err("Intent loop disconnected".to_string())
-                } else {
-                    match callback_rx.await {
-                        Ok(Ok(handle)) => VappCoreResponse::ok_handle(handle),
-                        Ok(Err(e)) => VappCoreResponse::err(e),
-                        Err(_) => VappCoreResponse::err("Intent loop dropped callback".to_string()),
+                    let msg = WireMessage::err(WireError::internal("Intent loop disconnected".into()));
+                    let _ = write_ndjson_async(&mut writer_half, &msg).await;
+                    continue;
+                }
+
+                let mut callback_future = callback_rx;
+                let final_msg = loop {
+                    tokio::select! {
+                        progress = progress_rx.recv() => {
+                            if let Some(p) = progress {
+                                let msg = WireMessage::progress(
+                                    p.percentage, p.message, p.phase, p.instance_name, p.task_name,
+                                );
+                                let _ = write_ndjson_async(&mut writer_half, &msg).await;
+                            }
+                        }
+                        result = &mut callback_future => {
+                            break match result {
+                                Ok(Ok(handle)) => WireMessage::ok_handle(handle),
+                                Ok(Err(e)) => WireMessage::err_string(e),
+                                Err(_) => WireMessage::err(WireError::internal(
+                                    "Intent loop dropped callback".into(),
+                                )),
+                            };
+                        }
                     }
+                };
+                if let Err(e) = write_ndjson_async(&mut writer_half, &final_msg).await {
+                    error!("Daemon: failed to send RunContainer response to {}: {}", peer, e);
+                    break;
                 }
             }
             Ok(VappCoreCommand::Stop { instance_id }) => {
                 let intent = RuntimeIntent::Stop { instance_id };
-                if intent_tx.send(intent).await.is_err() {
-                    VappCoreResponse::err("Intent loop disconnected".to_string())
+                let msg = if intent_tx.send(intent).await.is_err() {
+                    WireMessage::err(WireError::internal("Intent loop disconnected".into()))
                 } else {
-                    VappCoreResponse::ok_unit()
+                    WireMessage::ok_unit()
+                };
+                if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
+                    error!("Daemon: failed to send Stop response to {}: {}", peer, e);
+                    break;
                 }
             }
             Ok(VappCoreCommand::GetState { instance_id }) => {
@@ -140,13 +237,17 @@ where
                     instance_id,
                     reply: reply_tx,
                 };
-                if intent_tx.send(intent).await.is_err() {
-                    VappCoreResponse::err("Intent loop disconnected".to_string())
+                let msg = if intent_tx.send(intent).await.is_err() {
+                    WireMessage::err(WireError::internal("Intent loop disconnected".into()))
                 } else {
                     match reply_rx.recv().await {
-                        Some(state) => VappCoreResponse::ok_state(state),
-                        None => VappCoreResponse::err("Intent loop did not reply".to_string()),
+                        Some(state) => WireMessage::ok_state(state),
+                        None => WireMessage::err(WireError::internal("Intent loop did not reply".into())),
                     }
+                };
+                if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
+                    error!("Daemon: failed to send GetState response to {}: {}", peer, e);
+                    break;
                 }
             }
             Ok(VappCoreCommand::GetEndpoint { instance_id }) => {
@@ -155,44 +256,43 @@ where
                     instance_id,
                     callback: callback_tx,
                 };
-                if intent_tx.send(intent).await.is_err() {
-                    VappCoreResponse::err("Intent loop disconnected".to_string())
+                let msg = if intent_tx.send(intent).await.is_err() {
+                    WireMessage::err(WireError::internal("Intent loop disconnected".into()))
                 } else {
                     match callback_rx.await {
-                        Ok(Ok(ep)) => VappCoreResponse::ok_endpoint(ep),
-                        Ok(Err(e)) => VappCoreResponse::err(e),
-                        Err(_) => VappCoreResponse::err("Intent loop dropped callback".to_string()),
+                        Ok(Ok(ep)) => WireMessage::ok_endpoint(ep),
+                        Ok(Err(e)) => WireMessage::err_string(e),
+                        Err(_) => WireMessage::err(WireError::internal("Intent loop dropped callback".into())),
                     }
+                };
+                if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
+                    error!("Daemon: failed to send GetEndpoint response to {}: {}", peer, e);
+                    break;
                 }
             }
             Ok(VappCoreCommand::GetInterfaceIp { interface }) => {
-                match get_interface_ip(&interface) {
-                    Ok(ip) => VappCoreResponse::ok_interface_ip(interface, Some(ip)),
-                    Err(_) => VappCoreResponse::ok_interface_ip(interface, None),
+                let msg = match get_interface_ip(&interface) {
+                    Ok(ip) => WireMessage::ok_interface_ip(interface, Some(ip)),
+                    Err(_) => WireMessage::ok_interface_ip(interface, None),
+                };
+                if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
+                    error!("Daemon: failed to send GetInterfaceIp response to {}: {}", peer, e);
+                    break;
                 }
             }
             Err(e) => {
                 error!("Daemon: invalid command JSON: {}", e);
-                VappCoreResponse::err(format!("Invalid command: {}", e))
+                let msg = WireMessage::err(WireError::internal(format!("Invalid command: {}", e)));
+                if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
+                    error!("Daemon: failed to send error response to {}: {}", peer, e);
+                    break;
+                }
             }
-        };
-
-        let serialized = match serde_json::to_vec(&response) {
-            Ok(b) => b,
-            Err(e) => {
-                error!("Daemon: failed to serialize response: {}", e);
-                serde_json::to_vec(&VappCoreResponse::err(e.to_string())).unwrap_or_default()
-            }
-        };
-        if let Err(e) = stream.write_all(&serialized).await {
-            error!("Daemon: failed to send response to {}: {}", peer, e);
-            break;
         }
     }
 }
 
 /// Run the minimal Unix socket daemon. Uses `intent_tx` to send commands to the container intent loop.
-/// Unix only; on Windows returns an error (daemon is Linux-only in practice).
 pub async fn run_daemon_server(
     socket_path: &str,
     intent_tx: mpsc::Sender<RuntimeIntent>,
@@ -231,8 +331,6 @@ pub async fn run_daemon_server(
 }
 
 /// Run the minimal TCP daemon (Linux only). Binds to loopback only (e.g. 127.0.0.1:49163).
-/// Intended for host access via SSH port-forward when the host has no VSOCK (e.g. Windows):
-/// host runs `ssh -L local:127.0.0.1:49163 guest`, then connects to localhost:local.
 #[cfg(target_os = "linux")]
 pub async fn run_daemon_server_tcp(
     addr: &str,
@@ -258,7 +356,6 @@ pub async fn run_daemon_server_tcp(
 }
 
 /// Run the minimal VSOCK daemon (Linux only). Listens on VMADDR_CID_ANY and the given port.
-/// Used when vappd runs inside a VM and the host connects via VSOCK (e.g. --socket vsock:49163).
 #[cfg(target_os = "linux")]
 pub async fn run_daemon_server_vsock(
     port: u32,
