@@ -354,6 +354,295 @@ async fn test_blob_fetching() {
     }
 }
 
+/// Test anonymous pull of alpine:latest (manifest + one layer) through docker-proxy.
+/// Reproduces the 401 Unauthorized for layer issue: blob must return 200 for both
+/// manifest and blob when upstream requires Bearer token (anonymous pull).
+#[tokio::test]
+async fn test_docker_io_alpine_anonymous_pull_manifest_and_layer() {
+    init_test_tracing();
+
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let cache_dir = temp_dir.path().join("cache");
+
+    let mut config = Config::default();
+    config.server.port = 5062; // Unique port for this test
+
+    // Use default docker.io config (primary + fallbacks: registry-1.docker.io, docker.m.daocloud.io, registry.dockermirror.com)
+    assert!(
+        config.upstream.registries.contains_key("docker.io"),
+        "Default config must include docker.io"
+    );
+
+    let _server_handle = start_server(cache_dir.clone(), config.clone(), None, None)
+        .await
+        .expect("Failed to start docker-proxy server");
+
+    sleep(Duration::from_secs(2)).await;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .expect("Failed to create client");
+
+    // 1. GET manifest for alpine:latest (path as used by containerd: docker.io in path)
+    let manifest_url = format!(
+        "http://localhost:{}/v2/docker.io/library/alpine/manifests/latest",
+        config.server.port
+    );
+
+    tracing::info!("Fetching manifest: {}", manifest_url);
+    let manifest_response = client
+        .get(&manifest_url)
+        .header(
+            "Accept",
+            "application/vnd.docker.distribution.manifest.v2+json",
+        )
+        .send()
+        .await
+        .expect("Failed to send manifest request");
+
+    let manifest_status = manifest_response.status();
+    tracing::info!("Manifest response status: {}", manifest_status);
+
+    assert!(
+        manifest_status.is_success(),
+        "Manifest must return 200 for anonymous pull (got {}). \
+         Blob should handle 401 by fetching token and retrying.",
+        manifest_status
+    );
+
+    let manifest_bytes = manifest_response
+        .bytes()
+        .await
+        .expect("Failed to read manifest body");
+    let manifest_json: serde_json::Value =
+        serde_json::from_slice(&manifest_bytes).expect("Manifest must be valid JSON");
+
+    // alpine:latest may return OCI index (manifests[]) or schema 2 manifest (layers[])
+    let first_digest: String = if let Some(layers) = manifest_json.get("layers").and_then(|l| l.as_array()) {
+        layers
+            .first()
+            .and_then(|l| l.get("digest").and_then(|d| d.as_str()))
+            .expect("Schema 2 manifest must have layers[].digest")
+            .to_string()
+    } else if let Some(manifests) = manifest_json.get("manifests").and_then(|m| m.as_array()) {
+        // OCI index: fetch the first platform manifest by digest, then get first layer from it
+        let ref_digest = manifests
+            .first()
+            .and_then(|m| m.get("digest").and_then(|d| d.as_str()))
+            .expect("Index must have manifests[].digest");
+        let ref_manifest_url = format!(
+            "http://localhost:{}/v2/docker.io/library/alpine/manifests/{}",
+            config.server.port, ref_digest
+        );
+        let ref_manifest_response = client
+            .get(&ref_manifest_url)
+            .header(
+                "Accept",
+                "application/vnd.docker.distribution.manifest.v2+json",
+            )
+            .send()
+            .await
+            .expect("Failed to fetch referenced manifest");
+        assert!(
+            ref_manifest_response.status().is_success(),
+            "Referenced manifest must return 200 (got {})",
+            ref_manifest_response.status()
+        );
+        let ref_manifest_json: serde_json::Value = serde_json::from_slice(
+            &ref_manifest_response
+                .bytes()
+                .await
+                .expect("Failed to read ref manifest body"),
+        )
+        .expect("Ref manifest must be valid JSON");
+        ref_manifest_json
+            .get("layers")
+            .and_then(|l| l.as_array())
+            .and_then(|a| a.first())
+            .and_then(|l| l.get("digest").and_then(|d| d.as_str()))
+            .expect("Ref manifest must have layers[].digest")
+            .to_string()
+    } else {
+        panic!("Manifest must have layers (schema 2) or manifests (OCI index)");
+    };
+
+    tracing::info!("First layer digest: {}", first_digest);
+
+    // 2. GET blob for first layer (this is where 401 was observed in the wild)
+    let blob_url = format!(
+        "http://localhost:{}/v2/docker.io/library/alpine/blobs/{}",
+        config.server.port, first_digest
+    );
+
+    tracing::info!("Fetching blob: {}", blob_url);
+    let blob_response = client
+        .get(&blob_url)
+        .send()
+        .await
+        .expect("Failed to send blob request");
+
+    let blob_status = blob_response.status();
+    tracing::info!("Blob response status: {}", blob_status);
+
+    assert!(
+        blob_status.is_success(),
+        "Blob must return 200 for anonymous pull (got {}). \
+         Docker-proxy must handle 401 for layer by fetching token and retrying with same mirror.",
+        blob_status
+    );
+
+    let blob_len = blob_response
+        .bytes()
+        .await
+        .expect("Failed to read blob body")
+        .len();
+    assert!(blob_len > 0, "Blob body must be non-empty");
+
+    tracing::info!(
+        "[OK] alpine:latest anonymous pull: manifest 200, layer {} 200 ({} bytes)",
+        first_digest, blob_len
+    );
+}
+
+/// Test pulling images from multiple upstream registries in one session.
+/// Uses default config (docker.io with multiple mirrors, quay.io, etc.) and verifies
+/// that the proxy can successfully pull from at least two different upstreams.
+#[tokio::test]
+async fn test_pull_from_multiple_upstreams() {
+    init_test_tracing();
+
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let cache_dir = temp_dir.path().join("cache");
+
+    let mut config = Config::default();
+    config.server.port = 5063; // Unique port for this test
+
+    assert!(
+        config.upstream.registries.contains_key("docker.io"),
+        "Default config must include docker.io"
+    );
+    assert!(
+        config.upstream.registries.contains_key("quay.io"),
+        "Default config must include quay.io"
+    );
+
+    let _server_handle = start_server(cache_dir.clone(), config.clone(), None, None)
+        .await
+        .expect("Failed to start docker-proxy server");
+
+    sleep(Duration::from_secs(2)).await;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .expect("Failed to create client");
+
+    let base = format!("http://localhost:{}", config.server.port);
+
+    // 1. Pull manifest from docker.io (multiple mirrors: registry-1.docker.io, docker.m.daocloud.io, registry.dockermirror.com)
+    let docker_manifest_url = format!("{}/v2/docker.io/library/alpine/manifests/latest", base);
+    tracing::info!("Fetching docker.io manifest: {}", docker_manifest_url);
+    let docker_manifest = client
+        .get(&docker_manifest_url)
+        .header("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+        .send()
+        .await
+        .expect("Failed to send docker.io manifest request");
+    assert!(
+        docker_manifest.status().is_success(),
+        "docker.io alpine manifest must return 200 (got {})",
+        docker_manifest.status()
+    );
+    tracing::info!("[OK] docker.io: alpine manifest pulled");
+
+    // 2. Pull from quay.io (different upstream)
+    let quay_manifest_url = format!(
+        "{}/v2/quay.io/cilium/cilium/manifests/v1.17.7",
+        base
+    );
+    tracing::info!("Fetching quay.io manifest: {}", quay_manifest_url);
+    let quay_manifest = client
+        .get(&quay_manifest_url)
+        .header("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+        .send()
+        .await
+        .expect("Failed to send quay.io manifest request");
+    assert!(
+        quay_manifest.status().is_success(),
+        "quay.io cilium manifest must return 200 (got {}). \
+         If the image was removed, update the tag in this test.",
+        quay_manifest.status()
+    );
+    tracing::info!("[OK] quay.io: cilium/cilium manifest pulled");
+
+    tracing::info!("[OK] Pull from multiple upstreams (docker.io + quay.io) succeeded");
+}
+
+/// Test failover: primary mirror unreachable, secondary mirror succeeds.
+/// Configures docker.io with [unreachable, real]; verifies the proxy returns 200
+/// by using the second mirror after the first fails (connection error).
+#[tokio::test]
+async fn test_failover_primary_unreachable_secondary_succeeds() {
+    init_test_tracing();
+
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let cache_dir = temp_dir.path().join("cache");
+
+    // First mirror: nothing listens on this port → connection refused (fast).
+    // Second mirror: real Docker registry so manifest fetch can succeed.
+    let unreachable = "https://127.0.0.1:19999";
+    let real_mirror = "https://registry-1.docker.io";
+
+    let mut config = Config::default();
+    config.server.port = 5064;
+
+    config.upstream.registries.insert(
+        "docker.io".to_string(),
+        blob::config::RegistryConfig {
+            mirrors: vec![unreachable.to_string(), real_mirror.to_string()],
+            strategy: blob::config::MirrorStrategy::Failover,
+            max_parallel: 2,
+            chunk_size: 16_777_216,
+            hedge_delay_ms: 100,
+            timeout_secs: 10,
+            auth: None,
+            ca_cert_path: None,
+            insecure: false,
+        },
+    );
+
+    let _server_handle = start_server(cache_dir.clone(), config.clone(), None, None)
+        .await
+        .expect("Failed to start docker-proxy server");
+
+    sleep(Duration::from_secs(2)).await;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .expect("Failed to create client");
+
+    let manifest_url = format!(
+        "http://localhost:{}/v2/docker.io/library/alpine/manifests/latest",
+        config.server.port
+    );
+
+    let response = client
+        .get(&manifest_url)
+        .header("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+        .send()
+        .await
+        .expect("Failed to send manifest request");
+
+    assert!(
+        response.status().is_success(),
+        "Failover test: expected 200 after primary unreachable, got {}",
+        response.status()
+    );
+    tracing::info!("[OK] Failover test: primary unreachable, secondary succeeded");
+}
+
 /// Test default configuration structure
 #[test]
 fn test_default_config() {

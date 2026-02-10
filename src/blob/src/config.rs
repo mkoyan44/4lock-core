@@ -244,11 +244,20 @@ impl Config {
 
         let mut registries = HashMap::new();
 
-        // docker.io registry
+        // docker.io registry - primary + fallbacks for 502/unreachable (failover across mirrors).
+        // All listed mirrors support anonymous pull for public images (no login).
+        // Mirror list verified 2026-02-09: removed broken mirrors, added verified alternates.
         registries.insert(
             "docker.io".to_string(),
             RegistryConfig {
-                mirrors: vec!["https://registry-1.docker.io".to_string()],
+                mirrors: vec![
+                    "https://registry-1.docker.io".to_string(),      // Primary (verified manifest pull)
+                    "https://registry.hub.docker.com".to_string(),   // Official alternate (verified)
+                    "https://docker.1ms.run".to_string(),            // Fast mirror (verified 401)
+                    "https://dockerproxy.com".to_string(),           // Open proxy (verified 200)
+                    "https://docker.m.daocloud.io".to_string(),      // DaoCloud (verified 401)
+                    // Removed: registry.dockermirror.com (broken - Cloudflare 521 error)
+                ],
                 strategy: MirrorStrategy::Failover,
                 max_parallel: 4,
                 chunk_size: 16_777_216, // 16MB
@@ -376,11 +385,15 @@ impl Config {
     fn get_platform_images() -> Vec<String> {
         vec![
             // K8s control plane images with docker-proxy prefix (pre-pull via proxy)
-            "docker-proxy.internal:5050/coreos/etcd:v3.5.9".to_string(),
+            // etcd uses official registry.k8s.io image
+            "docker-proxy.internal:5050/etcd:v3.5.9".to_string(),
+            // Note: apiserver, controller-manager, scheduler use alpine:latest
+            // with binary injection during provisioning (see provisioner.rs)
             "docker-proxy.internal:5050/kube-apiserver:v1.29.0".to_string(),
             "docker-proxy.internal:5050/kube-controller-manager:v1.29.0".to_string(),
             "docker-proxy.internal:5050/kube-scheduler:v1.29.0".to_string(),
-            "docker-proxy.internal:5050/poseidon/kubelet:v1.27.2".to_string(),
+            // kubelet uses rancher/hyperkube (public image from Docker Hub)
+            "docker-proxy.internal:5050/rancher/hyperkube:v1.27.16-rancher1".to_string(),
         ]
     }
 

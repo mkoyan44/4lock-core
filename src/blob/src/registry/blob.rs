@@ -246,7 +246,7 @@ pub async fn get_blob(
         }
     };
 
-    // Handle 401 - get token and retry
+    // Handle 401 - get token and retry only the mirror that returned 401 (tokens are per-mirror)
     if response.status() == StatusCode::UNAUTHORIZED {
         if let Some(www_auth) = response.headers().get("www-authenticate") {
             if let Ok(auth_header) = www_auth.to_str() {
@@ -257,28 +257,220 @@ pub async fn get_blob(
                 )
                 .await
                 {
-                    response = match crate::registry::race_mirrors(
-                        &upstream_client,
-                        mirrors,
-                        &upstream_path,
-                        Some(&token),
-                        strategy,
-                        hedge_delay_ms,
-                        None,
-                        range_header.as_deref(),
-                        Some(&state.mirror_selector),
-                    )
-                    .await
-                    {
+                    let realm = crate::registry::manifest::realm_from_www_authenticate(auth_header);
+                    let mirror_ix = realm
+                        .as_ref()
+                        .and_then(|r| crate::registry::manifest::mirror_index_from_realm(r, mirrors));
+                    let mut mirror_failures: Vec<(String, String)> = Vec::new();
+                    let retry_response = {
+                        // Per-mirror auth retry: each mirror may have its own auth endpoint.
+                        // Official Docker Hub mirrors share auth.docker.io, but third-party mirrors
+                        // (docker.1ms.run, docker.m.daocloud.io) have their own token endpoints.
+                        // When a mirror returns 401, fetch a token from ITS auth endpoint and retry.
+                        let mut last_result = None;
+                        let indices: Vec<usize> = if let Some(ix) = mirror_ix {
+                            tracing::debug!(
+                                realm = ?realm,
+                                mirror_index = ix,
+                                "Retrying 401 on matched mirror first, then others with per-mirror auth"
+                            );
+                            let mut v = vec![ix];
+                            for i in 0..mirrors.len() {
+                                if i != ix { v.push(i); }
+                            }
+                            v
+                        } else {
+                            tracing::debug!(
+                                realm = ?realm,
+                                "401 realm doesn't match any mirror URL — trying all mirrors with per-mirror auth"
+                            );
+                            (0..mirrors.len()).collect()
+                        };
+                        for try_ix in indices {
+                            let attempt = crate::registry::mirror_racer::request_single_mirror(
+                                &upstream_client,
+                                mirrors,
+                                try_ix,
+                                &upstream_path,
+                                Some(&token),
+                                range_header.as_deref(),
+                            )
+                            .await;
+                            match attempt {
+                                Ok(resp) if resp.status().is_success() || resp.status() == StatusCode::PARTIAL_CONTENT => {
+                                    tracing::info!(
+                                        digest = %digest,
+                                        mirror_index = try_ix,
+                                        mirror = %mirrors[try_ix],
+                                        "Auth retry succeeded on mirror"
+                                    );
+                                    last_result = Some(Ok(resp));
+                                    break;
+                                }
+                                Ok(resp) if resp.status() == StatusCode::UNAUTHORIZED => {
+                                    // This mirror returned 401 — it needs its OWN token.
+                                    // Extract www-authenticate, fetch a per-mirror token, and retry once.
+                                    let mirror_www_auth = resp.headers()
+                                        .get("www-authenticate")
+                                        .and_then(|h| h.to_str().ok())
+                                        .map(|s| s.to_string());
+                                    if let Some(ref mwa) = mirror_www_auth {
+                                        tracing::info!(
+                                            digest = %digest,
+                                            mirror_index = try_ix,
+                                            mirror = %mirrors[try_ix],
+                                            www_authenticate = %mwa,
+                                            "Mirror returned 401 with own auth — fetching per-mirror token"
+                                        );
+                                        if let Some(mirror_token) = crate::registry::manifest::fetch_registry_token_with_cache(
+                                            mwa,
+                                            &repository,
+                                            Some(state.token_cache.clone()),
+                                        )
+                                        .await
+                                        {
+                                            // Retry this specific mirror with its own token
+                                            let mirror_retry = crate::registry::mirror_racer::request_single_mirror(
+                                                &upstream_client,
+                                                mirrors,
+                                                try_ix,
+                                                &upstream_path,
+                                                Some(&mirror_token),
+                                                range_header.as_deref(),
+                                            )
+                                            .await;
+                                            match mirror_retry {
+                                                Ok(r) if r.status().is_success() || r.status() == StatusCode::PARTIAL_CONTENT => {
+                                                    tracing::info!(
+                                                        digest = %digest,
+                                                        mirror_index = try_ix,
+                                                        mirror = %mirrors[try_ix],
+                                                        "Per-mirror auth retry succeeded"
+                                                    );
+                                                    last_result = Some(Ok(r));
+                                                    break;
+                                                }
+                                                other => {
+                                                    let reason = match &other {
+                                                        Ok(r) => format!("status {}", r.status()),
+                                                        Err(e) => format!("{}", e),
+                                                    };
+                                                    tracing::warn!(
+                                                        digest = %digest,
+                                                        mirror_index = try_ix,
+                                                        mirror = %mirrors[try_ix],
+                                                        reason = %reason,
+                                                        "Per-mirror auth retry also failed, trying next mirror"
+                                                    );
+                                                    mirror_failures.push((mirrors[try_ix].to_string(), reason.clone()));
+                                                    last_result = Some(other);
+                                                }
+                                            }
+                                        } else {
+                                            let reason = "per-mirror token fetch failed".to_string();
+                                            tracing::warn!(
+                                                digest = %digest,
+                                                mirror_index = try_ix,
+                                                mirror = %mirrors[try_ix],
+                                                "Per-mirror token fetch failed, trying next mirror"
+                                            );
+                                            mirror_failures.push((mirrors[try_ix].to_string(), reason));
+                                            last_result = Some(Ok(resp));
+                                        }
+                                    } else {
+                                        let reason = "401 without www-authenticate header".to_string();
+                                        tracing::warn!(
+                                            digest = %digest,
+                                            mirror_index = try_ix,
+                                            mirror = %mirrors[try_ix],
+                                            "Mirror returned 401 without www-authenticate, trying next"
+                                        );
+                                        mirror_failures.push((mirrors[try_ix].to_string(), reason));
+                                        last_result = Some(Ok(resp));
+                                    }
+                                }
+                                other => {
+                                    let reason = match &other {
+                                        Ok(resp) => format!("status {}", resp.status()),
+                                        Err(e) => format!("{}", e),
+                                    };
+                                    tracing::warn!(
+                                        digest = %digest,
+                                        mirror_index = try_ix,
+                                        mirror = %mirrors[try_ix],
+                                        reason = %reason,
+                                        "Auth retry failed on mirror, trying next"
+                                    );
+                                    mirror_failures.push((mirrors[try_ix].to_string(), reason.clone()));
+                                    last_result = Some(other);
+                                }
+                            }
+                        }
+                        last_result.unwrap_or_else(|| Err(crate::error::DockerProxyError::Registry(
+                            "No mirrors available for auth retry".to_string()
+                        )))
+                    };
+                    response = match retry_response {
                         Ok(resp) => resp,
                         Err(e) => {
-                            tracing::error!(digest = %digest, error = %e, "Failed to fetch blob with auth");
-                            return (StatusCode::BAD_GATEWAY, format!("Auth retry failed: {}", e))
+                            let failure_summary = if mirror_failures.is_empty() {
+                                "No mirrors attempted".to_string()
+                            } else {
+                                mirror_failures
+                                    .iter()
+                                    .map(|(mirror, reason)| format!("{}: {}", mirror, reason))
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            };
+                            tracing::error!(
+                                digest = %digest,
+                                error = %e,
+                                mirror_failures = %failure_summary,
+                                "Failed to fetch blob with auth (all {} mirrors exhausted)",
+                                mirrors.len()
+                            );
+                            return (
+                                StatusCode::BAD_GATEWAY,
+                                format!(
+                                    "Auth retry failed after trying {} mirror(s): {}. Last error: {}",
+                                    mirrors.len(),
+                                    failure_summary,
+                                    e
+                                )
+                            )
                                 .into_response();
                         }
                     };
+                } else {
+                    let realm = crate::registry::manifest::realm_from_www_authenticate(auth_header);
+                    tracing::error!(
+                        digest = %digest,
+                        auth_header = %auth_header,
+                        realm = ?realm,
+                        "Token fetch failed (auth server unreachable?). \
+                         Cannot retry 401 without a token. \
+                         Returning diagnostic 502 to client."
+                    );
+                    // Return a diagnostic error instead of the raw 401, so the caller
+                    // knows the blob server tried to handle auth but failed at token fetch.
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        format!(
+                            "Blob auth failed: token fetch from {:?} returned None (auth server unreachable from VM?). \
+                             www-authenticate: {}",
+                            realm, auth_header
+                        ),
+                    )
+                        .into_response();
                 }
             }
+        } else {
+            // 401 with no www-authenticate header — unusual
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("Blob 401 without www-authenticate header for {}", digest),
+            )
+                .into_response();
         }
     }
 
@@ -287,7 +479,19 @@ pub async fn get_blob(
     if !response.status().is_success() && !is_partial_content {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        tracing::error!(digest = %digest, status = %status, "Upstream returned error");
+        tracing::error!(
+            digest = %digest,
+            status = %status,
+            mirror_count = mirrors.len(),
+            "Upstream returned error (failover was attempted across all {} mirror(s))",
+            mirrors.len()
+        );
+        if status == StatusCode::BAD_GATEWAY {
+            tracing::error!(
+                digest = %digest,
+                "502 Bad Gateway: all upstream mirrors failed for this layer. Check blob server config has multiple docker.io mirrors for failover."
+            );
+        }
         return (status, body).into_response();
     }
 

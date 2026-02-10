@@ -38,6 +38,12 @@ Run a specific test:
 cargo test --test integration_test test_server_startup_and_health
 ```
 
+For stable results when pulling from Docker Hub (avoids rate limits when many tests run in parallel), run integration tests with a single thread:
+
+```bash
+cargo test --manifest-path src/blob/Cargo.toml --test integration_test -- --test-threads=1
+```
+
 ## Test Coverage
 
 ### Integration Tests (`integration_test.rs`)
@@ -45,6 +51,8 @@ cargo test --test integration_test test_server_startup_and_health
 - **Server Startup**: Server initialization and health endpoint
 - **Manifest Caching**: Caching by tag and digest (containerd compatibility)
 - **Embedded Registry**: Image pulling with embedded registry names (Helm chart format)
+- **Pull from multiple upstreams**: Manifest pull from docker.io and quay.io in one test (default config)
+- **Failover**: Primary mirror unreachable (e.g. connection refused), secondary mirror used and request succeeds (`test_failover_primary_unreachable_secondary_succeeds`)
 - **Cache Persistence**: Cache behavior across server restarts
 - **Blob Fetching**: Blob download and caching
 - **Configuration**: Config file loading and validation

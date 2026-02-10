@@ -1,4 +1,5 @@
 use crate::config::{RegistryConfig, UpstreamTlsConfig};
+use crate::dns::ipv4_prefer_resolver;
 use crate::error::{DockerProxyError, Result};
 use reqwest::Client;
 
@@ -28,12 +29,11 @@ impl UpstreamClient {
                         upstream_tls.insecure_skip_verify
                             || registry_config.map(|r| r.insecure).unwrap_or(false),
                     )
+                    // Prefer IPv4 for registry connections (VM may have IPv6-only DNS but no IPv6 route)
+                    .dns_resolver(ipv4_prefer_resolver())
                     // Connection pool configuration
                     .pool_max_idle_per_host(10) // Max idle connections per host
                     .pool_idle_timeout(std::time::Duration::from_secs(90)) // Keep connections alive for 90s
-                    // Enable HTTP/2 where supported (but don't force it - let server negotiate)
-                    // Removed http2_prior_knowledge() as it forces HTTP/2 and may cause issues
-                    // HTTP/2 will be negotiated automatically if server supports it
                     // Timeout configuration - use config value instead of hardcoded
                     .timeout(std::time::Duration::from_secs(timeout_secs))
                     .connect_timeout(std::time::Duration::from_secs(10));

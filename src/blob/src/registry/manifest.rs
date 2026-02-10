@@ -165,6 +165,12 @@ struct CachedToken {
 }
 
 impl TokenCache {
+    pub fn new() -> Self {
+        Self {
+            tokens: HashMap::new(),
+        }
+    }
+
     fn get(&self, key: &str) -> Option<String> {
         self.tokens.get(key).and_then(|cached| {
             if cached.expires_at > Instant::now() {
@@ -328,6 +334,51 @@ pub async fn fetch_registry_token_with_cache(
         }
     }
 
+    None
+}
+
+/// Extract realm URL from WWW-Authenticate header (e.g. for matching 401 to a mirror).
+pub fn realm_from_www_authenticate(www_auth: &str) -> Option<String> {
+    let auth_str = www_auth.strip_prefix("Bearer ").unwrap_or(www_auth);
+    for part in auth_str.split(',') {
+        let part = part.trim();
+        if part.starts_with("realm=") {
+            return part
+                .strip_prefix("realm=")
+                .and_then(|s| s.strip_prefix('"'))
+                .and_then(|s| s.strip_suffix('"'))
+                .map(|s| s.to_string());
+        }
+    }
+    None
+}
+
+/// Find the mirror index that corresponds to the auth realm from a 401 response.
+/// Tokens are per-mirror: we must retry only this mirror with the token.
+pub fn mirror_index_from_realm(realm_url: &str, mirrors: &[String]) -> Option<usize> {
+    let realm_lower = realm_url.to_lowercase();
+    let realm_host = realm_lower
+        .strip_prefix("https://")
+        .or_else(|| realm_lower.strip_prefix("http://"))
+        .and_then(|s| s.split('/').next())
+        .unwrap_or(&realm_lower);
+
+    for (idx, mirror) in mirrors.iter().enumerate() {
+        let mirror_trimmed = mirror.trim_end_matches('/');
+        let mirror_host = mirror_trimmed
+            .strip_prefix("https://")
+            .or_else(|| mirror_trimmed.strip_prefix("http://"))
+            .and_then(|s| s.split('/').next())
+            .unwrap_or(mirror_trimmed);
+
+        if realm_host == mirror_host {
+            return Some(idx);
+        }
+        // Docker Hub: realm is auth.docker.io, mirror is registry-1.docker.io
+        if realm_host == "auth.docker.io" && mirror_host.contains("registry-1.docker.io") {
+            return Some(idx);
+        }
+    }
     None
 }
 

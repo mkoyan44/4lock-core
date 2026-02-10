@@ -151,9 +151,10 @@ impl ImageManager {
 
         if !blob_response.status().is_success() {
             let status = blob_response.status();
+            let error_body = blob_response.text().await.unwrap_or_default();
             return Err(ContainerError::Runtime(format!(
-                "Docker-proxy returned error {} for layer {}",
-                status, digest
+                "Docker-proxy returned error {} for layer {}: {}",
+                status, digest, error_body
             )));
         }
 

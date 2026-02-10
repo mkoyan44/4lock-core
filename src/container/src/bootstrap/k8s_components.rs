@@ -41,7 +41,7 @@ pub fn get_k8s_components(cluster: &ClusterSpec) -> Vec<K8sComponent> {
     vec![
         K8sComponent {
             suffix: "etcd",
-            image: "quay.io/coreos/etcd:v3.5.9",
+            image: "registry.k8s.io/etcd:v3.5.9",
             order: 0,
             args: vec![
                 "/usr/local/bin/etcd".to_string(),
@@ -141,7 +141,7 @@ pub fn get_k8s_components_secure(
     vec![
         K8sComponent {
             suffix: "etcd",
-            image: "quay.io/coreos/etcd:v3.5.9",
+            image: "registry.k8s.io/etcd:v3.5.9",
             order: 0,
             args: vec![
                 "/usr/local/bin/etcd".to_string(),
@@ -244,9 +244,10 @@ pub fn get_k8s_components_secure(
         // Uses host's containerd socket (requires containerd installed on host)
         K8sComponent {
             suffix: "kubelet",
-            // Using poseidon/kubelet image which has kubelet binary and glibc dependencies
-            // Previous rootfs issues were fixed (socket directory mount + busybox injection)
-            image: "poseidon/kubelet:v1.27.2",
+            // Using rancher/hyperkube - public image with kubelet binary pre-installed
+            // registry.k8s.io/kubelet doesn't exist (empty repository)
+            // rancher/hyperkube is a public all-in-one Kubernetes binary image
+            image: "rancher/hyperkube:v1.27.16-rancher1",
             order: 4, // After scheduler
             // Args will be set by provisioner to execute kubelet with proper arguments
             args: vec!["/bin/sh".to_string(), "/start-kubelet.sh".to_string()],

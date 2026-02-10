@@ -274,6 +274,33 @@ pub async fn race_mirrors_hedged(
     }
 }
 
+/// Request a single mirror by index. Used for 401 retry: token is valid only for the
+/// mirror that returned 401, so we must retry that mirror only.
+pub async fn request_single_mirror(
+    upstream_client: &UpstreamClient,
+    mirrors: &[String],
+    mirror_index: usize,
+    url_path: &str,
+    auth_token: Option<&str>,
+    range_header: Option<&str>,
+) -> Result<Response> {
+    let mirror = mirrors.get(mirror_index).ok_or_else(|| {
+        DockerProxyError::Registry(format!("Mirror index {} out of range ({} mirrors)", mirror_index, mirrors.len()))
+    })?;
+    let client = upstream_client.client(mirror_index).clone();
+    let base = mirror.trim_end_matches('/');
+    let full_url = format!("{}{}", base, url_path);
+    let mut request = client.get(&full_url);
+    if let Some(token) = auth_token {
+        request = request.header("Authorization", format!("Bearer {}", token));
+    }
+    if let Some(range) = range_header {
+        request = request.header("Range", range);
+    }
+    let response = request.send().await.map_err(DockerProxyError::Http)?;
+    Ok(response)
+}
+
 /// Race multiple mirrors and return the fastest successful response
 /// Optionally includes an Authorization header for authenticated requests
 /// Supports different strategies: failover, hedged, adaptive
@@ -397,11 +424,16 @@ pub async fn race_mirrors(
         })
         .collect();
 
-    // Wait for the first successful response (2xx) or 401 (for auth handling)
-    // Continue waiting if we get error responses (4xx, 5xx) that aren't 401
+    // Wait for the first successful response (2xx).
+    // 401 is stored but does NOT stop the race — a different mirror may serve the
+    // blob without authentication (e.g. dockerproxy.com for public Docker Hub images).
+    // Only after ALL mirrors have responded do we fall back to the stored 401 so the
+    // caller (blob.rs) can attempt the token-exchange flow.
     let mut remaining_futures = futures;
     let mut last_error: Option<DockerProxyError> = None;
     let mut last_response: Option<(usize, Response, f64)> = None;
+    // Keep the first 401 we see — prefer it over generic errors for auth handling
+    let mut auth_response: Option<(usize, Response, f64)> = None;
 
     while !remaining_futures.is_empty() {
         let (result, _remaining_idx, futures_remaining) =
@@ -422,9 +454,8 @@ pub async fn race_mirrors(
                     "Received response from mirror - checking status"
                 );
 
-                // Accept successful responses (2xx) or 401 (for auth handling)
-                // Use reqwest::StatusCode::UNAUTHORIZED constant for clarity
-                if status.is_success() || status_u16 == reqwest::StatusCode::UNAUTHORIZED.as_u16() {
+                // 2xx → immediate win, cancel everything else
+                if status.is_success() {
                     let total_time = start_time.elapsed();
                     tracing::debug!(
                         mirror_index = idx,
@@ -432,12 +463,11 @@ pub async fn race_mirrors(
                         rtt_ms = rtt_ms,
                         total_time_ms = total_time.as_millis(),
                         status = %status,
-                        "Fastest successful mirror selected (2xx or 401)"
+                        "Mirror returned 2xx - accepting immediately"
                     );
 
                     // Track stats if selector provided
                     if let Some(selector) = mirror_selector {
-                        // Get content length for throughput calculation
                         let bytes = response
                             .headers()
                             .get("content-length")
@@ -461,6 +491,17 @@ pub async fn race_mirrors(
                     }
 
                     return Ok(response);
+                } else if status_u16 == reqwest::StatusCode::UNAUTHORIZED.as_u16() {
+                    // 401 → store for auth handling but keep racing other mirrors
+                    tracing::debug!(
+                        mirror_index = idx,
+                        mirror = %mirrors[idx],
+                        rtt_ms = rtt_ms,
+                        "Mirror returned 401 - storing for auth fallback, continuing race"
+                    );
+                    if auth_response.is_none() {
+                        auth_response = Some((idx, response, rtt_ms));
+                    }
                 } else {
                     // Store error response but continue waiting for other mirrors
                     tracing::warn!(
@@ -504,6 +545,18 @@ pub async fn race_mirrors(
         }
     }
 
+    // All mirrors responded — no 2xx found.
+    // Return stored 401 (if any) so blob.rs can attempt token-exchange auth.
+    if let Some((idx, response, _rtt_ms)) = auth_response {
+        tracing::info!(
+            mirror_index = idx,
+            mirror = %mirrors[idx],
+            mirror_count = mirrors.len(),
+            "No mirror returned 2xx; returning stored 401 for auth handling"
+        );
+        return Ok(response);
+    }
+
     // All mirrors have responded, but none were successful
     // Return the last error response if available (for proper error propagation)
     if let Some((idx, response, _rtt_ms)) = last_response {
@@ -512,9 +565,13 @@ pub async fn race_mirrors(
         tracing::error!(
             mirror_index = idx,
             mirror = %mirrors[idx],
+            mirror_count = mirrors.len(),
             status = %final_status,
             status_u16 = final_status_u16,
-            "All mirrors failed or returned non-success/non-401 status, returning last error response"
+            "All {} mirror(s) failed or returned non-success/non-401; returning last error (mirror {} returned {})",
+            mirrors.len(),
+            idx,
+            final_status
         );
 
         // CRITICAL: If we got 404 from all mirrors, this is suspicious
@@ -524,6 +581,15 @@ pub async fn race_mirrors(
             tracing::error!(
                 "Got 404 from all mirrors - this is unexpected for Docker Hub which should return 401 for auth. \
                  This might indicate:\n  - URL construction issue\n  - Request not reaching Docker Hub\n  - Network/proxy issue"
+            );
+        }
+
+        // 502 Bad Gateway: upstream mirror(s) failed; failover was attempted across all configured mirrors
+        if final_status_u16 == 502 {
+            tracing::error!(
+                mirror_count = mirrors.len(),
+                "502 from upstream: all configured mirror(s) returned 502. \
+                 Ensure multiple mirrors are configured for failover (e.g. docker.io: registry-1.docker.io, docker.m.daocloud.io, registry.dockermirror.com)."
             );
         }
 

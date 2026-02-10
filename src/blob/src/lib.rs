@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod certs;
 pub mod config;
+pub mod dns;
 pub mod error;
 pub mod helm;
 pub mod prepull;

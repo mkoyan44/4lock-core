@@ -129,7 +129,7 @@ fn main() {
 
         // Spawn blob (docker-proxy) server - required for image pulls (alpine, K8s images, etc.)
         let blob_cache = blob_cache_dir.clone();
-        tokio::spawn(async move {
+        let _blob_handle = tokio::spawn(async move {
             use blob::{start_server, Config};
             match start_server(blob_cache, Config::default(), None, None).await {
                 Ok(handle) => {
@@ -143,6 +143,25 @@ fn main() {
                 }
             }
         });
+
+        // Wait for blob (docker-proxy) to be ready before accepting commands (avoids early pulls hitting connection refused)
+        const BLOB_READY_TIMEOUT_MS: u64 = 15_000;
+        const BLOB_READY_POLL_MS: u64 = 200;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(BLOB_READY_TIMEOUT_MS);
+        while tokio::time::Instant::now() < deadline {
+            if client.get("http://127.0.0.1:5050/health").send().await.map(|r| r.status().is_success()).unwrap_or(false) {
+                info!("Blob (docker-proxy) ready");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(BLOB_READY_POLL_MS)).await;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!("Blob (docker-proxy) did not become ready within {}ms; image pulls may fail", BLOB_READY_TIMEOUT_MS);
+        }
 
         // Spawn hot-reload watcher (watches binary via virtio-fs mount)
         tokio::spawn(watch_binary_for_reload());

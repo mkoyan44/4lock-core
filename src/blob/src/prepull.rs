@@ -489,11 +489,15 @@ fn parse_repository(name: &str) -> (String, String) {
         let path = name
             .strip_prefix("docker-proxy.internal:5050/")
             .unwrap_or(name);
-        // Route based on path prefix: quay.io images vs registry.k8s.io images
-        if path.starts_with("coreos/") || path.starts_with("poseidon/") {
-            return ("quay.io".to_string(), path.to_string());
+
+        // Route based on image path:
+        // - rancher/* images → docker.io (Docker Hub)
+        // - Other images (etcd, kube-*) → registry.k8s.io (official Kubernetes registry)
+        if path.starts_with("rancher/") {
+            return ("docker.io".to_string(), path.to_string());
         }
-        // K8s control plane images (kube-apiserver, kube-controller-manager, kube-scheduler)
+
+        // Default: K8s control plane images use registry.k8s.io
         return ("registry.k8s.io".to_string(), path.to_string());
     }
 

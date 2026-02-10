@@ -5,10 +5,14 @@ ARG TARGET_ARCH
 
 FROM --platform=linux/${TARGET_ARCH} rust:1-bookworm AS builder
 
+ARG TARGET_ARCH
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     libssl-dev \
     pkg-config \
+    wget \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -22,22 +26,29 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     set -e && \
     cargo build -p vappcore --bin vapp-core-daemon --release && \
     cargo test -p vappcore --test public_api --no-run --release && \
+    cd src/blob && cargo test --no-run --release && cd ../.. && \
     cp /app/target/release/vapp-core-daemon /app/out-daemon && \
     mkdir -p /app/out-test && \
-    find /app/target/release/deps -maxdepth 1 -name 'public_api-*' ! -name '*.d' -executable -print0 | xargs -0 -I {} cp {} /app/out-test/public_api_test
+    find /app/target/release/deps -maxdepth 1 -name 'public_api-*' ! -name '*.d' -executable -print0 | xargs -0 -I {} cp {} /app/out-test/public_api_test && \
+    find /app/src/blob/target/release/deps -maxdepth 1 -name 'per_mirror_auth_test-*' ! -name '*.d' -executable -print0 | xargs -0 -I {} cp {} /app/out-test/per_mirror_auth_test && \
+    curl -fsSL https://github.com/containerd/nerdctl/releases/download/v1.7.6/nerdctl-1.7.6-linux-${TARGET_ARCH}.tar.gz | tar -xz -C /app/out-test/
 
 FROM --platform=linux/${TARGET_ARCH} debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     passt \
     ca-certificates \
+    containerd \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /root/.vapp /tmp/vapp-core
 
 COPY --from=builder /app/out-daemon /usr/local/bin/vapp-core-daemon
 COPY --from=builder /app/out-test/public_api_test /usr/local/bin/public_api_test
-RUN chmod +x /usr/local/bin/public_api_test
+COPY --from=builder /app/out-test/per_mirror_auth_test /usr/local/bin/per_mirror_auth_test
+COPY --from=builder /app/out-test/nerdctl /usr/local/bin/nerdctl
+RUN chmod +x /usr/local/bin/public_api_test /usr/local/bin/per_mirror_auth_test /usr/local/bin/nerdctl
 
 COPY docker/entrypoints/docker-entrypoint-core-test.sh /usr/local/bin/entrypoint
 RUN chmod 0755 /usr/local/bin/entrypoint
