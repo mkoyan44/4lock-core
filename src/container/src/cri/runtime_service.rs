@@ -417,7 +417,10 @@ impl RuntimeService for RuntimeServiceImpl {
         &self,
         _request: Request<ListContainersRequest>,
     ) -> Result<Response<ListContainersResponse>, Status> {
-        let registry = self.container_registry.lock().await;
+        let mut registry = self.container_registry.lock().await;
+        // Discover containers created by the provisioner (via youki directly)
+        // that aren't tracked in the in-memory registry
+        registry.discover_containers_from_disk();
         let containers = registry.list_containers();
 
         let items: Vec<Container> = containers
@@ -450,7 +453,9 @@ impl RuntimeService for RuntimeServiceImpl {
     ) -> Result<Response<ContainerStatusResponse>, Status> {
         let container_id = request.into_inner().container_id;
 
-        let registry = self.container_registry.lock().await;
+        let mut registry = self.container_registry.lock().await;
+        // Discover containers from disk in case this container was created by the provisioner
+        registry.discover_containers_from_disk();
         let container = registry
             .get_container(&container_id)
             .ok_or_else(|| Status::not_found(format!("Container {} not found", container_id)))?;

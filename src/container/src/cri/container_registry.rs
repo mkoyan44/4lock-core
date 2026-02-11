@@ -153,4 +153,155 @@ impl ContainerRegistry {
             .filter(|c| c.sandbox_id == sandbox_id)
             .collect()
     }
+
+    /// Discover containers from youki state files on disk that aren't in the in-memory registry.
+    /// This bridges the gap between containers created by the provisioner (via lifecycle directly)
+    /// and the CRI's in-memory tracking.
+    pub fn discover_containers_from_disk(&mut self) {
+        let containers_dir = self.app_dir.join("containers");
+        let entries = match std::fs::read_dir(&containers_dir) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let state_file = path.join("state.json");
+            if !state_file.exists() {
+                continue;
+            }
+
+            let container_id = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+
+            // Skip if already tracked in-memory
+            if self.containers.contains_key(&container_id) {
+                continue;
+            }
+
+            // Parse youki state.json
+            let content = match std::fs::read_to_string(&state_file) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let state: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let status = state["status"].as_str().unwrap_or("unknown");
+            let pid = state["pid"].as_u64().unwrap_or(0);
+            let bundle = state["bundle"]
+                .as_str()
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            let created_str = state["created"].as_str().unwrap_or("");
+
+            // Determine runtime state
+            let runtime_state = match status {
+                "running" => {
+                    // Verify the process is actually alive
+                    if pid > 0 && std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                        ContainerRuntimeState::Running
+                    } else {
+                        ContainerRuntimeState::Exited
+                    }
+                }
+                "created" => ContainerRuntimeState::Created,
+                "stopped" => ContainerRuntimeState::Exited,
+                _ => ContainerRuntimeState::Unknown,
+            };
+
+            // Try to extract image info from the bundle's config.json
+            let config_path = bundle.join("config.json");
+            let (image, labels, annotations) = if config_path.exists() {
+                let config_content = std::fs::read_to_string(&config_path).unwrap_or_default();
+                let config: serde_json::Value =
+                    serde_json::from_str(&config_content).unwrap_or_default();
+
+                let image = config["process"]["args"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                let labels = config["labels"]
+                    .as_object()
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let annotations = config["annotations"]
+                    .as_object()
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                (image, labels, annotations)
+            } else {
+                ("unknown".to_string(), HashMap::new(), HashMap::new())
+            };
+
+            // Parse created timestamp
+            let created_at = chrono::DateTime::parse_from_rfc3339(created_str)
+                .map(|dt| {
+                    SystemTime::UNIX_EPOCH
+                        + std::time::Duration::from_secs(dt.timestamp() as u64)
+                })
+                .unwrap_or(SystemTime::now());
+
+            let started_at = if runtime_state == ContainerRuntimeState::Running {
+                Some(created_at)
+            } else {
+                None
+            };
+
+            // Derive a human-readable name from the container ID
+            // Container IDs are typically like "vapp-<hash>-<name>"
+            let name = container_id
+                .rsplit('-')
+                .next()
+                .unwrap_or(&container_id)
+                .to_string();
+
+            let cri_state = CriContainerState {
+                id: container_id.clone(),
+                sandbox_id: String::new(), // provisioner containers don't have a CRI sandbox
+                name,
+                image: image.clone(),
+                image_ref: image,
+                created_at,
+                started_at,
+                finished_at: None,
+                state: runtime_state,
+                exit_code: 0,
+                bundle_path: bundle,
+                labels,
+                annotations,
+                metadata: None,
+            };
+
+            tracing::info!(
+                "[ContainerRegistry] Discovered container from disk: {} (status: {})",
+                container_id,
+                status
+            );
+
+            self.containers.insert(container_id, cri_state);
+        }
+    }
 }
