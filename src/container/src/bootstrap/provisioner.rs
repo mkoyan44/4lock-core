@@ -5574,6 +5574,42 @@ users:
 
         Ok(kubelet_config_dir)
     }
+
+    /// Wait for ZeroTier IP to be assigned by polling the IP file written by start-zerotier.sh
+    #[cfg(target_os = "linux")]
+    async fn wait_for_zerotier_ip(
+        &self,
+        instance_id: &str,
+        timeout: Duration,
+    ) -> Result<String, ProvisionError> {
+        let ip_file = self
+            .app_dir
+            .join("containers/volumes")
+            .join(instance_id)
+            .join("zerotier-data/ip.txt");
+
+        tracing::info!(
+            "[ContainerProvisioner] Waiting for ZeroTier IP file: {}",
+            ip_file.display()
+        );
+
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(&ip_file) {
+                let ip = contents.trim();
+                if !ip.is_empty() {
+                    return Ok(ip.to_string());
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(ProvisionError::Runtime(format!(
+                    "ZeroTier IP not assigned within {}s. Check container logs.",
+                    timeout.as_secs()
+                )));
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -5586,7 +5622,7 @@ impl RuntimeProvisioner for ContainerProvisioner {
         let instance_id = &spec.instance_id;
 
         tracing::info!(
-            "[ContainerProvisioner] Provisioning device container group: {}",
+            "[ContainerProvisioner] Provisioning device (ZeroTier VPN): {}",
             instance_id
         );
 
@@ -5600,7 +5636,7 @@ impl RuntimeProvisioner for ContainerProvisioner {
 
         #[cfg(target_os = "linux")]
         {
-            // 1. Create container group with instance_id (vapp-{uuid})
+            // 1. Create container group
             progress.emit(5, "Creating container group...".to_string());
             let _group = self.create_container_group(instance_id)?;
             tracing::info!(
@@ -5608,45 +5644,32 @@ impl RuntimeProvisioner for ContainerProvisioner {
                 instance_id
             );
 
-            // 2. Generate certificates via alpine utility container
-            progress.emit(10, "Generating certificates...".to_string());
-            let cert_paths = self
-                .generate_certificates(instance_id, &spec.cluster.service_cidr)
-                .await?;
+            // 2. Pull ZeroTier image
+            progress.emit(10, "Pulling ZeroTier image...".to_string());
+            use crate::bootstrap::k8s_components::get_zerotier_component;
+            let mut zt_component = get_zerotier_component();
+            tracing::info!(
+                "[ContainerProvisioner] Pulling image: {}",
+                zt_component.image
+            );
+            self.image_manager
+                .ensure_image(zt_component.image)
+                .await
+                .map_err(|e| {
+                    ProvisionError::Image(format!(
+                        "Failed to pull ZeroTier image {}: {}",
+                        zt_component.image, e
+                    ))
+                })?;
 
-            // 2.5. Generate kubelet configuration files (needed before kubelet container starts)
-            progress.emit(15, "Generating kubelet configuration...".to_string());
-            self.generate_kubelet_config(instance_id, &cert_paths, &spec.cluster)?;
+            // 3. Create and start ZeroTier container
+            progress.emit(30, "Starting ZeroTier container...".to_string());
+            let container_name = format!("{}-zerotier", instance_id);
+            tracing::info!(
+                "[ContainerProvisioner] Creating ZeroTier container: {}",
+                container_name
+            );
 
-            // 3. Get K8s component specifications (secure mode with TLS)
-            progress.emit(20, "Preparing Kubernetes components...".to_string());
-            use crate::bootstrap::k8s_components::get_k8s_components_secure;
-            let mut k8s_components =
-                get_k8s_components_secure(&spec.cluster, &spec.network, None, instance_id);
-            // Sort by order
-            k8s_components.sort_by_key(|c| c.order);
-
-            // 4. Pull images for all K8s components
-            progress.emit(25, "Pulling Kubernetes images...".to_string());
-            for component in &k8s_components {
-                tracing::info!(
-                    "[ContainerProvisioner] Pulling image for {}: {}",
-                    component.suffix,
-                    component.image
-                );
-                self.image_manager
-                    .ensure_image(component.image)
-                    .await
-                    .map_err(|e| {
-                        ProvisionError::Image(format!(
-                            "Failed to pull image {} for {}: {}",
-                            component.image, component.suffix, e
-                        ))
-                    })?;
-            }
-
-            // 5. Create and start K8s containers in order (with certificate mounts)
-            let total_components = k8s_components.len();
             let mut group = self
                 .container_manager
                 .get_container_group(instance_id)
@@ -5654,149 +5677,42 @@ impl RuntimeProvisioner for ContainerProvisioner {
                     ProvisionError::Runtime(format!("Failed to get container group: {}", e))
                 })?;
 
-            for (index, component) in k8s_components.iter_mut().enumerate() {
-                let container_name = format!("{}-{}", instance_id, component.suffix);
-                let progress_pct = 30 + ((index * 40) / total_components.max(1));
+            let container_info = self
+                .create_and_start_k8s_container(
+                    instance_id,
+                    &mut zt_component,
+                    &container_name,
+                    Some(&spec.network),
+                    None,
+                )
+                .await?;
 
-                progress.emit(
-                    progress_pct as u32,
-                    format!("Creating {} container...", component.suffix),
-                );
+            // Save container to group
+            group.containers.push(container_info.clone());
+            let content = serde_json::to_string_pretty(&group).map_err(|e| {
+                ProvisionError::Runtime(format!("Failed to serialize container group: {}", e))
+            })?;
+            std::fs::write(&group.state_file, content).map_err(ProvisionError::Io)?;
 
-                tracing::info!(
-                    "[ContainerProvisioner] Creating K8s container: {} (order: {})",
-                    container_name,
-                    component.order
-                );
+            progress.emit(50, "ZeroTier container started".to_string());
+            tracing::info!(
+                "[ContainerProvisioner] ZeroTier container started: {}",
+                container_name
+            );
 
-                // Wait for dependencies to be ready
-                if !component.depends_on.is_empty() {
-                    progress.emit(
-                        progress_pct as u32,
-                        format!("Waiting for {} dependencies...", component.suffix),
-                    );
-                    self.wait_for_dependencies(instance_id, component, &group)
-                        .await?;
-                }
-
-                // NOTE: With shared network namespace, all containers communicate via localhost (127.0.0.1)
-                // No address translation needed - k8s_components.rs already uses localhost addresses
-                // The shared namespace (initialized by provisioner) provides:
-                // - Direct localhost communication between all containers
-                // - Internet connectivity via pasta
-                // - No port forwarding required
-
-                // Create and start the K8s container
-                let container_info = self
-                    .create_and_start_k8s_container(
-                        instance_id,
-                        component,
-                        &container_name,
-                        Some(&spec.network),
-                        None, // No ZeroTier IP
-                    )
-                    .await?;
-
-                // Add container to group and save manually
-                group.containers.push(container_info.clone());
-
-                // Save group state manually (save_container_group is private)
-                let content = serde_json::to_string_pretty(&group).map_err(|e| {
-                    ProvisionError::Runtime(format!("Failed to serialize container group: {}", e))
-                })?;
-                std::fs::write(&group.state_file, content).map_err(ProvisionError::Io)?;
-
-                progress.emit(
-                    progress_pct as u32 + 5,
-                    format!("{} container started", component.suffix),
-                );
-
-                tracing::info!(
-                    "[ContainerProvisioner] Successfully created and started K8s container: {}",
-                    container_name
-                );
-            }
-
-            progress.emit(70, "Verifying Kubernetes API server...".to_string());
-
-            // Verify kube-apiserver is accessible (HTTPS with certificates)
-            // Use localhost - API server is accessible via port forwarding on host
-            self.verify_k8s_api_accessible(None).await?;
-            tracing::info!("[ContainerProvisioner] Kubernetes API is accessible and ready");
-
-            // 6. Deploy infrastructure using task-based workflow
-            // This includes: RBAC, RuntimeClass, StorageClass, Cilium CNI, CoreDNS
-            progress.emit(80, "Planning infrastructure deployment...".to_string());
-
-            // Plan infrastructure operations
-            let infra_ops = crate::bootstrap::workflows::plan_infra_ops(
-                &self.template_renderer,
-                &spec.cluster,
-                instance_id,
-            )?;
+            // 4. Wait for ZeroTier IP assignment
+            progress.emit(60, "Waiting for ZeroTier IP assignment...".to_string());
+            let zt_ip = self
+                .wait_for_zerotier_ip(instance_id, Duration::from_secs(120))
+                .await?;
 
             tracing::info!(
-                "[ContainerProvisioner] Planned {} infrastructure operations",
-                infra_ops.len()
+                "[ContainerProvisioner] ZeroTier VPN connected - IP: {}",
+                zt_ip
             );
+            progress.emit(90, format!("ZeroTier VPN connected ({})", zt_ip));
 
-            // Create task executor
-            let work_dir = self.app_dir.join("containers/utility-manifests");
-            std::fs::create_dir_all(&work_dir).map_err(ProvisionError::Io)?;
-
-            // Generate kubeconfig for kubectl tasks
-            let kubeconfig = self
-                .template_renderer
-                .render("kubeconfig/admin.kubeconfig.j2", &HashMap::new())?;
-            let kubeconfig_path = work_dir.join(format!("{}-infra-kubeconfig", instance_id));
-            std::fs::create_dir_all(&kubeconfig_path).map_err(ProvisionError::Io)?;
-            let kubeconfig_file = kubeconfig_path.join("config");
-            std::fs::write(&kubeconfig_file, kubeconfig).map_err(ProvisionError::Io)?;
-
-            // Pass the parent volumes directory so certs are mounted as /certs/ca, /certs/kubernetes, etc.
-            let volumes_base = cert_paths.ca_dir.parent().ok_or_else(|| {
-                ProvisionError::Config("Invalid certificate path structure".to_string())
-            })?;
-            let executor = crate::bootstrap::workflows::TaskExecutor::new(
-                &self.utility_runner,
-                &self.image_manager,
-                kubeconfig_path.clone(),
-                volumes_base.to_path_buf(),
-                work_dir,
-            );
-
-            // Execute infrastructure operations with progress tracking
-            progress.emit(82, "Deploying infrastructure...".to_string());
-            let progress_clone = progress.clone();
-            crate::bootstrap::workflows::run_infra_ops(
-                &infra_ops,
-                &executor,
-                82,
-                95,
-                |pct, msg| {
-                    progress_clone.emit(pct, msg.to_string());
-                },
-            )
-            .await?;
-
-            // 7. Wait for node to become Ready after CNI deployment
-            progress.emit(96, "Waiting for node to become Ready...".to_string());
-            crate::bootstrap::workflows::wait_for_node_ready(
-                instance_id,
-                &self.utility_runner,
-                &self.image_manager,
-                &kubeconfig_path,
-                &volumes_base.to_path_buf(),
-                std::time::Duration::from_secs(180),
-            )
-            .await?;
-
-            // 10. External kubeconfig generation skipped (not needed without ZeroTier)
-            tracing::debug!(
-                "[ContainerProvisioner] Skipping external kubeconfig generation (ZeroTier not enabled)"
-            );
-
-            progress.emit(100, "Kubernetes cluster ready".to_string());
+            progress.emit(100, "VPN ready".to_string());
 
             let endpoint = self.get_endpoint(instance_id).await?;
 

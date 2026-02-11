@@ -2,7 +2,27 @@
 ///
 /// Defines the Kubernetes control plane components (etcd, apiserver, controller-manager, scheduler)
 /// that will run as separate containers using official Kubernetes images.
+/// Also defines the ZeroTier VPN component for device networking.
 use crate::intent::{ClusterSpec, NetworkSpec};
+
+/// Get ZeroTier VPN component for device provisioning
+///
+/// Returns a single component that runs the ZeroTier daemon inside a privileged container.
+/// The provisioner handles volume mounts, startup scripts, and network configuration
+/// when it detects `suffix == "zerotier"`.
+pub fn get_zerotier_component() -> K8sComponent {
+    K8sComponent {
+        suffix: "zerotier",
+        image: "zerotier/zerotier:latest",
+        order: 0,
+        // Args overridden by provisioner to: /bin/sh /start-zerotier.sh
+        args: vec!["/bin/sh".to_string(), "/start-zerotier.sh".to_string()],
+        ports: vec![9993], // ZeroTier control port
+        depends_on: vec![],
+        privileged: true,          // Required for TUN device creation
+        network_namespace: None,   // Uses host network (set by provisioner for internet access)
+    }
+}
 
 /// Kubernetes component configuration
 pub struct K8sComponent {
