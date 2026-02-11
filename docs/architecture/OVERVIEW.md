@@ -41,7 +41,7 @@
 
 ## Key Documentation
 
-- **[Crate Architecture](.cursor/docs/01-crate-architecture.md)** – Module layout for blob, container, vappc.
-- **[Development Guide](.cursor/docs/05-development-guide.md)** – Cargo, Makefile, docker, testing.
+- **[Crate Architecture](docs/architecture/CRATE_ARCHITECTURE.md)** – Module layout for blob, container, vappc.
+- **[Development Guide](docs/development/DEVELOPMENT_GUIDE.md)** – Cargo, Makefile, docker, testing.
 
-All Cursor docs live under `.cursor/docs/`.
+All docs live under `docs/`.

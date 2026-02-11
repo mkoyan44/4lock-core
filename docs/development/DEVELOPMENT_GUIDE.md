@@ -68,7 +68,7 @@ make run-dev
 
 ## Adding a feature
 
-1. **Place in the right crate** – See `.cursor/docs/01-crate-architecture.md` (blob vs container vs vappcore).
+1. **Place in the right crate** – See `docs/architecture/CRATE_ARCHITECTURE.md` (blob vs container vs vappcore).
 2. **Bootstrap tasks** – Keep idempotent; validate template variables; use numbered script names.
 3. **CRI/OCI** – Follow existing patterns in `container/cri/` and `container/rootless/`.
 4. **Protocol** – Any new daemon commands go in vappcore (protocol + daemon + client).

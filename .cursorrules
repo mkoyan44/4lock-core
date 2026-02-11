@@ -1,27 +1,162 @@
-# Cursor Rules for 4lock-core
+# 4lock-core — AI Assistant Rules (Cursor + Claude Code)
 
-This file references Cursor resources in `.cursor/`. Rules and docs are adapted from 4lock-agent and instantiated for 4lock-core (Linux-only Rust workspace: blob, container, vappcore).
+This repository is configured for both **Cursor** and **Claude Code**:
+- **Cursor**: Reads this file (`.cursorrules`)
+- **Claude Code**: Reads `CLAUDE.md` at repo root
 
-## Directory structure
+Both tools share the same documentation in `docs/`.
 
-- **`.cursor/docs/`** – Architecture and development docs (overview, crate layout, dev guide). See `.cursor/docs/README.md`.
-- **`.cursor/rules/`** – Modular rules (context inclusion, core project, Rust workspace, workflow, architecture, OS). See `.cursor/README.md`.
+---
 
-## Context loading
+## Project Overview
 
-**MANDATORY**: Before any task, consult relevant docs in `.cursor/docs/` and rules in `.cursor/rules/`. See `.cursor/rules/00-context-inclusion.mdc` for what to load and when.
+4Lock Core is a **Linux-only Rust workspace** providing core crates for the 4lock platform: OCI registry proxy (blob), rootless container runtime (container), and daemon/client socket API (vappcore). No UI — consumed by 4lock-agent.
 
-## Key rules
+## Context Loading — MANDATORY
 
-1. **Always consult `.cursor/docs/` and `.cursor/rules/`** before making changes.
-2. **Crate placement**: blob (registry/cache), container (OCI/CRI/bootstrap), vappcore (daemon/protocol/client). See `.cursor/docs/01-crate-architecture.md`.
-3. **Build/run**: On Linux use Cargo or Makefile; on other hosts use `make` (containerized). Default `make` = build then run. `make run` uses detached container + `logs -f`; Ctrl+C stops and removes the container and exits. See `.cursor/docs/05-development-guide.md`.
-4. **Bootstrap**: Tasks must be idempotent; validate template variables. See `.cursor/rules/05-architecture-usage.mdc`.
+**Before any task**, consult relevant docs in `docs/`:
+1. `docs/architecture/OVERVIEW.md` — System purpose, layout, design principles
+2. `docs/architecture/CRATE_ARCHITECTURE.md` — Crate boundaries, module layout
+3. `docs/development/DEVELOPMENT_GUIDE.md` — Build, run, test procedures
+4. `docs/architecture/NAMING.md` — Naming glossary (vapp, vappd, vappcore, etc.)
+5. `docs/troubleshooting/BLOB_502_TROUBLESHOOTING.md` — Blob 502 diagnostics
 
-## Quick links
+---
 
-- **Overview**: `.cursor/docs/00-overview.md`
-- **Crate layout**: `.cursor/docs/01-crate-architecture.md`
-- **Development**: `.cursor/docs/05-development-guide.md`
-- **Context rule**: `.cursor/rules/00-context-inclusion.mdc`
-- **Core project**: `.cursor/rules/01-core-project.mdc`
+## Project Layout
+
+- **src/blob/** — Registry proxy, image pull cache, mirror racing, prepull, Helm
+- **src/container/** — Rootless OCI runtime, CRI server, bootstrap (intent loop, provisioner, templates, tasks), K8s components
+- **src/vappcore/** — Daemon binary, client library, protocol (Unix/VSOCK/TCP). API used by 4lock-agent
+- **docker/** — `Dockerfile.core` (multi-stage), entrypoints
+- **packaging/** — systemd unit, install guide
+- **docs/** — Architecture, development, troubleshooting
+
+## What You MUST Be Careful With
+
+- **Do NOT modify** proto definitions under `src/container/proto/` (CRI) unless intentionally changing the CRI contract and updating all consumers
+- **Be cautious changing**: `build.rs` in any crate, Dockerfile and entrypoint, bootstrap templates and task ordering (idempotency and variable validation)
+
+When changes are necessary in these areas, propose the plan first and wait for confirmation.
+
+---
+
+## OS and Platform Rules
+
+4lock-core is **Linux-only** for runtime (rootless OCI, CRI, vappcore daemon).
+
+### Linux (Primary)
+- **Native build/run**: Cargo and run daemon binary directly. Requires Linux (namespaces, uidmap, pasta).
+- **Containerized build/run**: `make` (build then run), uses nerdctl + `docker/dockerfiles/Dockerfile.core`.
+- **TARGET_ARCH**: Auto-detected from host. Override in `.env`. Prefer native arch (cross-arch uses QEMU, can be slow/flaky).
+
+### Non-Linux Hosts (macOS, Windows)
+- **No native run**. Use `make` for containerized build/run.
+- Do NOT assume `cargo build -p vappcore` or `cargo test -p container` will succeed on non-Linux.
+
+---
+
+## Crate Placement Decision Framework
+
+1. **Where does this belong?**
+   - **blob** — Registry proxy, cache, prepull, Helm, mirror racing
+   - **container** — Rootless OCI, CRI server, bootstrap (intent loop, provisioner, templates, tasks)
+   - **vappcore** — Daemon, client, wire protocol
+   - Confirm with `docs/architecture/CRATE_ARCHITECTURE.md`
+
+2. **Does it affect bootstrap?**
+   - Keep tasks **idempotent**; validate template variables; use numbered script names (10-*.sh, 20-*.sh)
+   - Document if changing workflow semantics
+
+3. **Does it affect the daemon or protocol?**
+   - vappcore protocol is consumed by 4lock-agent. Prefer backward-compatible extensions.
+   - See `docs/architecture/CRATE_ARCHITECTURE.md` (vappcore) and `docs/architecture/OVERVIEW.md`
+
+4. **Does it affect CRI or OCI?**
+   - CRI: `container/cri/`. OCI/rootless: `container/rootless/`. Follow existing patterns and Linux rootless rules.
+
+---
+
+## Rust Workspace Guidelines
+
+Cargo workspace at repo root with crates under `src/`: **blob**, **container**, **vappcore** (+ virtual **daemon**).
+
+### Style
+- Target **Rust 2021+**, idiomatic style
+- `Result<T, E>` with **thiserror** for error enums
+- **tracing** for logging (`tracing::info!`, `tracing::debug!`, etc.)
+- Avoid panicking in library code unless clearly justified
+- Run `cargo fmt` on changed crates before finalizing
+- Treat `cargo clippy` warnings as guidance; avoid introducing new warnings
+
+### Cross-Crate Changes
+- Shared types: prefer a clear owner crate; avoid duplicating types across blob/container/vappcore
+- When changing multiple crates: identify all dependents, update imports/call sites, run `cargo check --workspace` and `cargo test --workspace`
+- Prefer **incremental changes** over large cross-workspace refactors
+
+### Crate-Specific Notes
+- **container/rootless/** — Keep host networking and pivot_root semantics per Linux rootless rules
+- **container/cri/** — Changes affect kubelet compatibility; add tests and document
+- **container/bootstrap/** — Intent loop, provisioner, templates. Tasks must be idempotent
+- **blob** — Keep cache and registry APIs consistent; avoid leaking HTTP details into callers
+- **vappcore/protocol** — Wire format used by 4lock-agent; version or extend backward-compatibly
+
+---
+
+## Build and Run Commands
+
+### On Linux (native)
+```bash
+cargo build -p daemon                                    # All crates
+cargo build -p vappcore --release --bin vapp-core-daemon  # Daemon only
+cargo test --workspace                                    # All tests
+cargo fmt && cargo clippy --all-targets --all-features    # Format + lint
+```
+
+### Any host (containerized via Makefile)
+```bash
+make                  # Default: build + run (release)
+make from-scratch     # Same as above
+make build            # Release build (BuildKit cache mounts)
+make run              # Privileged container, Ctrl+C stops and removes
+make build-dev        # Dev profile (fast recompile)
+make run-dev          # Run dev build
+make test             # Build + run tests in container
+make push             # Push to GHCR (needs GH_OWNER/GH_TOKEN)
+```
+
+`make run`/`make run-dev`: Container runs detached under `4lock-core-run`; Makefile attaches with `nerdctl logs -f`. Ctrl+C stops and removes the container.
+
+Always run **from repo root**. Prefer showing exact commands.
+
+---
+
+## Testing and Validation
+
+1. Identify which crates are impacted (blob, container, vappcore)
+2. Run `cargo check -p <crate>` and `cargo test -p <crate>` for affected crates
+3. For full workspace: `cargo test --workspace` when touching cross-crate behavior
+4. If touching container runtime/CRI, run relevant container tests
+5. Describe what to run and what success looks like; never assume tests pass
+
+---
+
+## Code Review Checklist
+
+- [ ] Consulted relevant docs (overview, crate-architecture, dev-guide)
+- [ ] Feature placed in correct crate (blob / container / vappcore)
+- [ ] Bootstrap tasks idempotent and template vars validated
+- [ ] CRI/OCI and protocol changes documented and tested
+- [ ] `cargo test` (scoped or workspace) run and passing
+
+---
+
+## Quick Links
+
+- **Overview**: `docs/architecture/OVERVIEW.md`
+- **Crate layout**: `docs/architecture/CRATE_ARCHITECTURE.md`
+- **Development**: `docs/development/DEVELOPMENT_GUIDE.md`
+- **Naming**: `docs/architecture/NAMING.md`
+- **Blob troubleshooting**: `docs/troubleshooting/BLOB_502_TROUBLESHOOTING.md`
+
+**Note**: 4lock-core has no event bus or FSM; those live in 4lock-agent. Here we have daemon/client protocol, container bootstrap, and CRI/OCI behavior.
