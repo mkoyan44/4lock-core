@@ -159,9 +159,21 @@ impl ContainerRegistry {
     /// and the CRI's in-memory tracking.
     pub fn discover_containers_from_disk(&mut self) {
         let containers_dir = self.app_dir.join("containers");
+        tracing::info!(
+            "[ContainerRegistry] discover_containers_from_disk: scanning {:?} (in-memory count: {})",
+            containers_dir,
+            self.containers.len()
+        );
         let entries = match std::fs::read_dir(&containers_dir) {
             Ok(entries) => entries,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!(
+                    "[ContainerRegistry] discover_containers_from_disk: failed to read {:?}: {}",
+                    containers_dir,
+                    e
+                );
+                return;
+            }
         };
 
         for entry in entries.flatten() {
@@ -170,8 +182,13 @@ impl ContainerRegistry {
                 continue;
             }
 
+            let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
             let state_file = path.join("state.json");
             if !state_file.exists() {
+                tracing::debug!(
+                    "[ContainerRegistry] Skipping {:?}: no state.json",
+                    dir_name
+                );
                 continue;
             }
 
@@ -182,18 +199,42 @@ impl ContainerRegistry {
 
             // Skip if already tracked in-memory
             if self.containers.contains_key(&container_id) {
+                tracing::debug!(
+                    "[ContainerRegistry] Skipping {}: already tracked in-memory",
+                    container_id
+                );
                 continue;
             }
+
+            tracing::info!(
+                "[ContainerRegistry] Found untracked container on disk: {} (state file: {:?})",
+                container_id,
+                state_file
+            );
 
             // Parse youki state.json
             let content = match std::fs::read_to_string(&state_file) {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!(
+                        "[ContainerRegistry] Failed to read state.json for {}: {}",
+                        container_id,
+                        e
+                    );
+                    continue;
+                }
             };
 
             let state: serde_json::Value = match serde_json::from_str(&content) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!(
+                        "[ContainerRegistry] Failed to parse state.json for {}: {}",
+                        container_id,
+                        e
+                    );
+                    continue;
+                }
             };
 
             let status = state["status"].as_str().unwrap_or("unknown");
@@ -226,12 +267,15 @@ impl ContainerRegistry {
                 let config: serde_json::Value =
                     serde_json::from_str(&config_content).unwrap_or_default();
 
-                let image = config["process"]["args"]
-                    .as_array()
-                    .and_then(|a| a.first())
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
+                // Try annotations for image name, fall back to container name
+                let image = config["annotations"]["io.kubernetes.cri.image-name"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| container_id
+                        .rsplit('-')
+                        .next()
+                        .unwrap_or(&container_id)
+                        .to_string());
 
                 let labels = config["labels"]
                     .as_object()
@@ -278,6 +322,11 @@ impl ContainerRegistry {
                 .unwrap_or(&container_id)
                 .to_string();
 
+            let metadata = Some(ContainerMetadata {
+                name: name.clone(),
+                attempt: 0,
+            });
+
             let cri_state = CriContainerState {
                 id: container_id.clone(),
                 sandbox_id: String::new(), // provisioner containers don't have a CRI sandbox
@@ -292,7 +341,7 @@ impl ContainerRegistry {
                 bundle_path: bundle,
                 labels,
                 annotations,
-                metadata: None,
+                metadata,
             };
 
             tracing::info!(
