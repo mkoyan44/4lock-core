@@ -917,15 +917,26 @@ impl UtilityRunner {
             let _ = tx.send(result);
         });
 
-        // Wait for the result asynchronously
-        rx.await
-            .map_err(|e| ProvisionError::Runtime(format!("Thread communication error: {}", e)))?
-            .map_err(|e| {
-                ProvisionError::Runtime(format!(
-                    "Failed to start utility container {}: {}",
-                    container_name, e
-                ))
-            })?;
+        // Wait for the result asynchronously with timeout (prevent indefinite hangs)
+        let start_result = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            rx,
+        )
+        .await
+        .map_err(|_| {
+            ProvisionError::Runtime(format!(
+                "Timed out waiting for container start (120s): {}",
+                container_name
+            ))
+        })?
+        .map_err(|e| ProvisionError::Runtime(format!("Thread communication error: {}", e)))?;
+
+        start_result.map_err(|e| {
+            ProvisionError::Runtime(format!(
+                "Failed to start utility container {}: {}",
+                container_name, e
+            ))
+        })?;
 
         tracing::debug!(
             "[UtilityRunner] Container start task completed for: {}",

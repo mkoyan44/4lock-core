@@ -239,33 +239,68 @@ impl ImageManager {
         );
 
         let client = reqwest::Client::new();
-        let manifest_response = client
-            .get(&manifest_url)
-            .header(
-                "Accept",
-                "application/vnd.docker.distribution.manifest.v2+json",
-            )
-            .send()
-            .await
-            .map_err(|e| {
-                ContainerError::Runtime(format!(
-                    "Failed to fetch manifest from docker-proxy: {}",
-                    e
-                ))
-            })?;
 
-        if !manifest_response.status().is_success() {
-            let status = manifest_response.status();
-            let error_body = manifest_response.text().await.unwrap_or_default();
-            return Err(ContainerError::Runtime(format!(
-                "Docker-proxy returned error {}: {}",
-                status, error_body
-            )));
-        }
+        // Retry manifest fetch with backoff (network/DNS may not be ready on fresh VM boot)
+        const MANIFEST_MAX_RETRIES: u32 = 5;
+        let mut manifest_json: serde_json::Value = {
+            let mut last_error = String::new();
+            let mut result = None;
+            for attempt in 0..=MANIFEST_MAX_RETRIES {
+                if attempt > 0 {
+                    let delay_ms = 2000 * (1 << (attempt - 1).min(3)); // 2s, 4s, 8s, 16s, 16s
+                    tracing::warn!(
+                        "[ImageManager] Retrying manifest fetch (attempt {}/{}): {} (waiting {}ms)",
+                        attempt + 1,
+                        MANIFEST_MAX_RETRIES + 1,
+                        manifest_url,
+                        delay_ms
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                }
 
-        let mut manifest_json: serde_json::Value = manifest_response.json().await.map_err(|e| {
-            ContainerError::Runtime(format!("Failed to parse manifest JSON: {}", e))
-        })?;
+                let resp = client
+                    .get(&manifest_url)
+                    .header(
+                        "Accept",
+                        "application/vnd.docker.distribution.manifest.v2+json",
+                    )
+                    .send()
+                    .await;
+
+                match resp {
+                    Ok(manifest_response) if manifest_response.status().is_success() => {
+                        match manifest_response.json().await {
+                            Ok(json) => {
+                                result = Some(json);
+                                break;
+                            }
+                            Err(e) => {
+                                last_error = format!("Failed to parse manifest JSON: {}", e);
+                            }
+                        }
+                    }
+                    Ok(manifest_response) => {
+                        let status = manifest_response.status();
+                        let error_body = manifest_response.text().await.unwrap_or_default();
+                        last_error = format!("Docker-proxy returned error {}: {}", status, error_body);
+                        tracing::warn!(
+                            "[ImageManager] Manifest fetch attempt {} failed: {}",
+                            attempt + 1,
+                            last_error
+                        );
+                    }
+                    Err(e) => {
+                        last_error = format!("Failed to fetch manifest from docker-proxy: {}", e);
+                        tracing::warn!(
+                            "[ImageManager] Manifest fetch attempt {} failed: {}",
+                            attempt + 1,
+                            last_error
+                        );
+                    }
+                }
+            }
+            result.ok_or_else(|| ContainerError::Runtime(last_error))?
+        };
 
         tracing::info!("[ImageManager] Fetched manifest from docker-proxy");
 

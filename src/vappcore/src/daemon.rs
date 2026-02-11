@@ -19,6 +19,9 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info};
 
+/// Maximum time to wait for a Start/RunContainer provisioning to complete (10 minutes).
+const PROVISIONING_TIMEOUT_SECS: u64 = 600;
+
 fn cmd_short_label(cmd: &VappCoreCommand) -> &'static str {
     match cmd {
         VappCoreCommand::Ping => "Ping",
@@ -140,8 +143,9 @@ where
                     continue;
                 }
 
-                // Stream progress and wait for final result using select!
+                // Stream progress and wait for final result using select! with overall timeout
                 let mut callback_future = callback_rx;
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(PROVISIONING_TIMEOUT_SECS);
                 let final_msg = loop {
                     tokio::select! {
                         progress = progress_rx.recv() => {
@@ -171,6 +175,12 @@ where
                                 )),
                             };
                         }
+                        _ = tokio::time::sleep_until(deadline) => {
+                            error!("Daemon: Start command timed out after {}s for {}", PROVISIONING_TIMEOUT_SECS, peer);
+                            break WireMessage::err(WireError::timeout(
+                                format!("Provisioning timed out after {}s", PROVISIONING_TIMEOUT_SECS),
+                            ));
+                        }
                     }
                 };
                 if let Err(e) = write_ndjson_async(&mut writer_half, &final_msg).await {
@@ -193,6 +203,7 @@ where
                 }
 
                 let mut callback_future = callback_rx;
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(PROVISIONING_TIMEOUT_SECS);
                 let final_msg = loop {
                     tokio::select! {
                         progress = progress_rx.recv() => {
@@ -211,6 +222,12 @@ where
                                     "Intent loop dropped callback".into(),
                                 )),
                             };
+                        }
+                        _ = tokio::time::sleep_until(deadline) => {
+                            error!("Daemon: RunContainer command timed out after {}s for {}", PROVISIONING_TIMEOUT_SECS, peer);
+                            break WireMessage::err(WireError::timeout(
+                                format!("RunContainer timed out after {}s", PROVISIONING_TIMEOUT_SECS),
+                            ));
                         }
                     }
                 };
