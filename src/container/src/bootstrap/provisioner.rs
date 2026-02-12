@@ -5607,6 +5607,158 @@ users:
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
+
+    /// Per-container readiness wait with smooth time-based progress.
+    ///
+    /// Polls the container's readiness condition (running state + component-specific checks)
+    /// and smoothly increments progress between pct_start and pct_end based on elapsed time.
+    ///
+    /// Returns `Some(ip)` if the component produced an IP address (e.g., ZeroTier), else `None`.
+    #[cfg(target_os = "linux")]
+    async fn wait_container_ready(
+        &self,
+        instance_id: &str,
+        component: &crate::bootstrap::k8s_components::K8sComponent,
+        progress: &Arc<dyn ProgressReporter>,
+        pct_start: u32,
+        pct_end: u32,
+        idx: usize,
+        total: usize,
+    ) -> Result<Option<String>, ProvisionError> {
+        use crate::rootless::commands::{load_container, ContainerStatus};
+
+        let timeout = Duration::from_secs(120);
+        let poll = Duration::from_secs(2);
+        let start = std::time::Instant::now();
+        let container_name = format!("{}-{}", instance_id, component.suffix);
+        let name = component.suffix;
+
+        loop {
+            // Check container is running
+            let root_path = self.container_manager.root_path().to_path_buf();
+            let is_running = match load_container(&root_path, &container_name) {
+                Ok(c) => c.status() == ContainerStatus::Running,
+                Err(_) => false,
+            };
+
+            if is_running {
+                // Component-specific readiness check
+                if component.suffix == "zerotier" {
+                    // ZeroTier: wait for IP assignment
+                    let ip_file = self
+                        .app_dir
+                        .join("containers/volumes")
+                        .join(instance_id)
+                        .join("zerotier-data/ip.txt");
+                    if let Ok(contents) = std::fs::read_to_string(&ip_file) {
+                        let ip = contents.trim();
+                        if !ip.is_empty() {
+                            tracing::info!(
+                                "[ContainerProvisioner] [{}/{}] {} ready - IP: {}",
+                                idx, total, name, ip
+                            );
+                            return Ok(Some(ip.to_string()));
+                        }
+                    }
+                } else {
+                    // Generic: container is running = ready
+                    return Ok(None);
+                }
+            }
+
+            if start.elapsed() > timeout {
+                return Err(ProvisionError::Runtime(format!(
+                    "Container {} readiness timeout after {}s",
+                    name,
+                    timeout.as_secs()
+                )));
+            }
+
+            // Smooth progress based on elapsed time (cap at 95% of range to leave room for "ready")
+            let ratio = (start.elapsed().as_secs_f64() / timeout.as_secs_f64()).min(0.95);
+            let pct = pct_start + ((pct_end - pct_start) as f64 * ratio) as u32;
+            progress.emit_detailed(
+                pct,
+                format!(
+                    "[{}/{}] Container started, checking readiness {}",
+                    idx, total, name
+                ),
+                Some("ready".into()),
+                Some(name.into()),
+            );
+            tokio::time::sleep(poll).await;
+        }
+    }
+
+    /// Group readiness wait — verifies all containers in the group are healthy.
+    ///
+    /// Smooth time-based progress between pct_start and pct_end.
+    #[cfg(target_os = "linux")]
+    async fn wait_for_group_readiness(
+        &self,
+        instance_id: &str,
+        components: &[crate::bootstrap::k8s_components::K8sComponent],
+        _zt_ip: Option<&str>,
+        progress: &Arc<dyn ProgressReporter>,
+        pct_start: u32,
+        pct_end: u32,
+    ) -> Result<(), ProvisionError> {
+        use crate::rootless::commands::{load_container, ContainerStatus};
+
+        let timeout = Duration::from_secs(60);
+        let poll = Duration::from_secs(2);
+        let start = std::time::Instant::now();
+
+        loop {
+            let root_path = self.container_manager.root_path().to_path_buf();
+            let mut all_ready = true;
+
+            for component in components {
+                let container_name = format!("{}-{}", instance_id, component.suffix);
+                match load_container(&root_path, &container_name) {
+                    Ok(c) if c.status() == ContainerStatus::Running => {}
+                    _ => {
+                        all_ready = false;
+                        break;
+                    }
+                }
+            }
+
+            if all_ready {
+                progress.emit_detailed(
+                    pct_end,
+                    "Group ready".to_string(),
+                    Some("group".into()),
+                    Some("readiness".into()),
+                );
+                tracing::info!(
+                    "[ContainerProvisioner] All {} containers ready for {}",
+                    components.len(),
+                    instance_id
+                );
+                return Ok(());
+            }
+
+            if start.elapsed() > timeout {
+                return Err(ProvisionError::Network(
+                    "Group readiness timeout — not all containers running".to_string(),
+                ));
+            }
+
+            let ratio = (start.elapsed().as_secs_f64() / timeout.as_secs_f64()).min(0.95);
+            let pct = pct_start + ((pct_end - pct_start) as f64 * ratio) as u32;
+            progress.emit_detailed(
+                pct,
+                format!(
+                    "Waiting for group readiness... ({:.0}s)",
+                    start.elapsed().as_secs_f64()
+                ),
+                Some("group".into()),
+                Some("readiness".into()),
+            );
+            tokio::time::sleep(poll).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -5619,7 +5771,7 @@ impl RuntimeProvisioner for ContainerProvisioner {
         let instance_id = &spec.instance_id;
 
         tracing::info!(
-            "[ContainerProvisioner] Provisioning device (ZeroTier VPN): {}",
+            "[ContainerProvisioner] Provisioning device: {}",
             instance_id
         );
 
@@ -5633,83 +5785,177 @@ impl RuntimeProvisioner for ContainerProvisioner {
 
         #[cfg(target_os = "linux")]
         {
-            // 1. Create container group
-            progress.emit(5, "Creating container group...".to_string());
+            use crate::bootstrap::k8s_components::get_zerotier_component;
+
+            // 1. Create container group (0-2%)
+            progress.emit_detailed(
+                1,
+                "Creating container group...".to_string(),
+                Some("init".into()),
+                Some("create_group".into()),
+            );
             let _group = self.create_container_group(instance_id)?;
             tracing::info!(
                 "[ContainerProvisioner] Created container group: {}",
                 instance_id
             );
 
-            // 2. Pull ZeroTier image
-            progress.emit(10, "Pulling ZeroTier image...".to_string());
-            use crate::bootstrap::k8s_components::get_zerotier_component;
-            let mut zt_component = get_zerotier_component();
-            tracing::info!(
-                "[ContainerProvisioner] Pulling image: {}",
-                zt_component.image
-            );
-            self.image_manager
-                .ensure_image(zt_component.image)
-                .await
-                .map_err(|e| {
-                    ProvisionError::Image(format!(
-                        "Failed to pull ZeroTier image {}: {}",
-                        zt_component.image, e
-                    ))
+            // 2. Get device components (generic — today zerotier, tomorrow may include more)
+            let mut components = vec![get_zerotier_component()];
+            let n = components.len();
+
+            // 3. Per-component loop (2-80%)
+            //    Each component gets an equal slice of the 2..80 range.
+            //    Within each slice: image pull = 50%, create+start = 20%, readiness = 30%
+            let mut zt_ip: Option<String> = None;
+
+            for i in 0..n {
+                let base = 2 + (78 * i as u32 / n as u32);
+                let next = 2 + (78 * (i + 1) as u32 / n as u32);
+                let span = next - base;
+
+                let img_end = base + span * 50 / 100;
+                let start_end = img_end + span * 20 / 100;
+                let ready_end = next;
+
+                let name = components[i].suffix;
+
+                // 3a. Pull image with per-layer sub-progress
+                progress.emit_detailed(
+                    base,
+                    format!("[{}/{}] Pulling image...                      {}", i + 1, n, name),
+                    Some("image".into()),
+                    Some(name.into()),
+                );
+
+                tracing::info!(
+                    "[ContainerProvisioner] [{}/{}] Pulling image: {} ({})",
+                    i + 1, n, components[i].image, name
+                );
+
+                let progress_clone = progress.clone();
+                let name_str = name.to_string();
+                let idx = i + 1;
+                let total = n;
+                self.image_manager
+                    .ensure_image_with_progress(
+                        components[i].image,
+                        Some(&|step: usize, total_steps: usize, _msg: &str| {
+                            let pct = base + ((img_end - base) * step as u32 / total_steps.max(1) as u32);
+                            progress_clone.emit_detailed(
+                                pct,
+                                format!("[{}/{}] Pulling image...                      {}", idx, total, name_str),
+                                Some("image".into()),
+                                Some(name_str.clone()),
+                            );
+                        }),
+                    )
+                    .await
+                    .map_err(|e| {
+                        ProvisionError::Image(format!(
+                            "Failed to pull image {} for {}: {}",
+                            components[i].image, name, e
+                        ))
+                    })?;
+
+                // 3b. Create + start container
+                let container_name = format!("{}-{}", instance_id, name);
+                tracing::info!(
+                    "[ContainerProvisioner] [{}/{}] Creating container: {}",
+                    i + 1, n, container_name
+                );
+
+                progress.emit_detailed(
+                    img_end,
+                    format!("[{}/{}] Starting container...                 {}", i + 1, n, name),
+                    Some("container".into()),
+                    Some(name.into()),
+                );
+
+                let mut group = self
+                    .container_manager
+                    .get_container_group(instance_id)
+                    .map_err(|e| {
+                        ProvisionError::Runtime(format!("Failed to get container group: {}", e))
+                    })?;
+
+                let container_info = self
+                    .create_and_start_k8s_container(
+                        instance_id,
+                        &mut components[i],
+                        &container_name,
+                        Some(&spec.network),
+                        None,
+                    )
+                    .await?;
+
+                // Save container to group
+                group.containers.push(container_info.clone());
+                let content = serde_json::to_string_pretty(&group).map_err(|e| {
+                    ProvisionError::Runtime(format!("Failed to serialize container group: {}", e))
                 })?;
+                std::fs::write(&group.state_file, content).map_err(ProvisionError::Io)?;
 
-            // 3. Create and start ZeroTier container
-            progress.emit(30, "Starting ZeroTier container...".to_string());
-            let container_name = format!("{}-zerotier", instance_id);
-            tracing::info!(
-                "[ContainerProvisioner] Creating ZeroTier container: {}",
-                container_name
+                progress.emit_detailed(
+                    start_end,
+                    format!("[{}/{}] Container started, checking readiness {}", i + 1, n, name),
+                    Some("container".into()),
+                    Some(name.into()),
+                );
+
+                tracing::info!(
+                    "[ContainerProvisioner] [{}/{}] Container started: {}",
+                    i + 1, n, container_name
+                );
+
+                // 3c. Per-container readiness (time-based smooth progress)
+                let readiness_result = self
+                    .wait_container_ready(
+                        instance_id,
+                        &components[i],
+                        &progress,
+                        start_end,
+                        ready_end,
+                        i + 1,
+                        n,
+                    )
+                    .await?;
+
+                // Capture ZeroTier IP if this component produced one
+                if let Some(ip) = readiness_result {
+                    zt_ip = Some(ip);
+                }
+
+                progress.emit_detailed(
+                    ready_end,
+                    format!("[{}/{}] Container ready                       {}", i + 1, n, name),
+                    Some("ready".into()),
+                    Some(name.into()),
+                );
+
+                tracing::info!(
+                    "[ContainerProvisioner] [{}/{}] Container ready: {}",
+                    i + 1, n, name
+                );
+            }
+
+            // 4. Group readiness (80-100%) — all containers healthy
+            self.wait_for_group_readiness(
+                instance_id,
+                &components,
+                zt_ip.as_deref(),
+                &progress,
+                80,
+                99,
+            )
+            .await?;
+
+            progress.emit_detailed(
+                100,
+                "Device provisioned".to_string(),
+                Some("done".into()),
+                Some("complete".into()),
             );
-
-            let mut group = self
-                .container_manager
-                .get_container_group(instance_id)
-                .map_err(|e| {
-                    ProvisionError::Runtime(format!("Failed to get container group: {}", e))
-                })?;
-
-            let container_info = self
-                .create_and_start_k8s_container(
-                    instance_id,
-                    &mut zt_component,
-                    &container_name,
-                    Some(&spec.network),
-                    None,
-                )
-                .await?;
-
-            // Save container to group
-            group.containers.push(container_info.clone());
-            let content = serde_json::to_string_pretty(&group).map_err(|e| {
-                ProvisionError::Runtime(format!("Failed to serialize container group: {}", e))
-            })?;
-            std::fs::write(&group.state_file, content).map_err(ProvisionError::Io)?;
-
-            progress.emit(50, "ZeroTier container started".to_string());
-            tracing::info!(
-                "[ContainerProvisioner] ZeroTier container started: {}",
-                container_name
-            );
-
-            // 4. Wait for ZeroTier IP assignment
-            progress.emit(60, "Waiting for ZeroTier IP assignment...".to_string());
-            let zt_ip = self
-                .wait_for_zerotier_ip(instance_id, Duration::from_secs(120))
-                .await?;
-
-            tracing::info!(
-                "[ContainerProvisioner] ZeroTier VPN connected - IP: {}",
-                zt_ip
-            );
-            progress.emit(90, format!("ZeroTier VPN connected ({})", zt_ip));
-
-            progress.emit(100, "VPN ready".to_string());
 
             let endpoint = self.get_endpoint(instance_id).await?;
 
@@ -5736,51 +5982,128 @@ impl RuntimeProvisioner for ContainerProvisioner {
             app_name
         );
 
-        // 1. Pull/prepare image (container-specific!)
-        progress.emit(10, "Pulling container image...".to_string());
-        let _image_path = self
-            .image_manager
-            .ensure_image(&self.config.image.base_image)
+        // Progress layout (single component = app):
+        // 0-2%:   Creating container group
+        // 2-40%:  [1/1] Pulling image...  app_name
+        // 40-50%: [1/1] Starting container... app_name
+        // 50-60%: [1/1] Running bootstrap... app_name
+        // 60-80%: [1/1] Setting up Kubernetes... app_name
+        // 80-99%: [1/1] Container started, checking readiness app_name
+        // 100%:   App provisioned
+
+        // 1. Create container group (0-2%)
+        progress.emit_detailed(
+            1,
+            "Creating container group...".to_string(),
+            Some("init".into()),
+            Some("create_group".into()),
+        );
+
+        // 2. Pull image (2-40%) with per-layer progress
+        progress.emit_detailed(
+            2,
+            format!("[1/1] Pulling image...                      {}", app_name),
+            Some("image".into()),
+            Some(app_name.into()),
+        );
+
+        let progress_clone = progress.clone();
+        let app_name_str = app_name.to_string();
+        self.image_manager
+            .ensure_image_with_progress(
+                &self.config.image.base_image,
+                Some(&|step: usize, total_steps: usize, _msg: &str| {
+                    let pct = 2 + (38 * step as u32 / total_steps.max(1) as u32);
+                    progress_clone.emit_detailed(
+                        pct,
+                        format!("[1/1] Pulling image...                      {}", app_name_str),
+                        Some("image".into()),
+                        Some(app_name_str.clone()),
+                    );
+                }),
+            )
             .await
             .map_err(|e| ProvisionError::Image(e.to_string()))?;
 
-        // 2. Create volumes from StorageSpec (container-specific!)
-        progress.emit(20, "Creating volumes...".to_string());
+        // 3. Create volumes + prepare bundle (40-50%)
+        progress.emit_detailed(
+            40,
+            format!("[1/1] Starting container...                 {}", app_name),
+            Some("container".into()),
+            Some(app_name.into()),
+        );
         let volumes = self.storage_to_volumes(instance_id, &spec.storage).await?;
-
-        // 3. Prepare OCI bundle
-        progress.emit(30, "Preparing container bundle...".to_string());
         let bundle = self
             .prepare_bundle(instance_id, spec, "worker", &volumes)
             .map_err(|e| ProvisionError::Bundle(e.to_string()))?;
 
-        // 4. Create container
-        progress.emit(50, "Creating container...".to_string());
+        // 4. Create + start container (45-50%)
+        progress.emit_detailed(
+            45,
+            format!("[1/1] Starting container...                 {}", app_name),
+            Some("container".into()),
+            Some(app_name.into()),
+        );
         self.runtime
             .create(instance_id, &bundle)
             .await
             .map_err(|e| ProvisionError::Runtime(e.to_string()))?;
 
-        // 5. Start container
-        progress.emit(60, "Starting container...".to_string());
         self.runtime
             .start(instance_id)
             .await
             .map_err(|e| ProvisionError::Runtime(e.to_string()))?;
 
-        // 6. Bootstrap workflow (container-specific scripts)
-        progress.emit(70, "Running bootstrap...".to_string());
+        progress.emit_detailed(
+            50,
+            format!("[1/1] Container started, checking readiness {}", app_name),
+            Some("container".into()),
+            Some(app_name.into()),
+        );
+
+        // 5. Bootstrap workflow (50-60%)
+        progress.emit_detailed(
+            50,
+            format!("[1/1] Running bootstrap...                  {}", app_name),
+            Some("bootstrap".into()),
+            Some(app_name.into()),
+        );
         workflow::run_bootstrap(instance_id, spec, &bundle, self.runtime.clone())
             .await
             .map_err(|e| ProvisionError::Bootstrap(e.to_string()))?;
 
-        // 7. Setup Kubernetes
-        progress.emit(85, "Setting up Kubernetes...".to_string());
+        // 6. Setup Kubernetes (60-80%)
+        progress.emit_detailed(
+            60,
+            format!("[1/1] Setting up Kubernetes...              {}", app_name),
+            Some("kubernetes".into()),
+            Some(app_name.into()),
+        );
         workflow::setup_kubernetes(instance_id, spec, "worker", self.runtime.clone())
             .await
             .map_err(|e| ProvisionError::Bootstrap(e.to_string()))?;
 
-        progress.emit(100, "App container provisioned successfully".to_string());
+        progress.emit_detailed(
+            80,
+            format!("[1/1] Container ready                       {}", app_name),
+            Some("ready".into()),
+            Some(app_name.into()),
+        );
+
+        // 7. Group readiness (80-99%)
+        progress.emit_detailed(
+            99,
+            "Group ready".to_string(),
+            Some("group".into()),
+            Some("readiness".into()),
+        );
+
+        progress.emit_detailed(
+            100,
+            "App provisioned".to_string(),
+            Some("done".into()),
+            Some("complete".into()),
+        );
 
         let endpoint = self.get_endpoint(instance_id).await?;
 

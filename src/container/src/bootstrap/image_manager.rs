@@ -97,6 +97,19 @@ impl ImageManager {
 
     /// Ensure image is available (pull if needed)
     pub async fn ensure_image(&self, image_ref: &str) -> Result<PathBuf, ContainerError> {
+        self.ensure_image_with_progress(image_ref, None).await
+    }
+
+    /// Ensure image is available (pull if needed), with optional progress callback.
+    ///
+    /// The callback receives `(step, total_steps, message)` where:
+    /// - total_steps = 2 * num_layers + 1 (manifest + download each + extract each)
+    /// - step increments through: manifest(0), download(1..=N), extract(N+1..=2N)
+    pub async fn ensure_image_with_progress(
+        &self,
+        image_ref: &str,
+        on_progress: Option<&(dyn Fn(usize, usize, &str) + Send + Sync)>,
+    ) -> Result<PathBuf, ContainerError> {
         tracing::info!("[ImageManager] Ensuring image is available: {}", image_ref);
 
         // Parse image reference
@@ -112,6 +125,9 @@ impl ImageManager {
         // Check if image is already cached (has rootfs and manifest)
         if rootfs_path.exists() && manifest_path.exists() {
             tracing::info!("[ImageManager] Image found in cache: {:?}", image_dir);
+            if let Some(cb) = on_progress {
+                cb(1, 1, "Image cached");
+            }
             return Ok(image_dir);
         }
 
@@ -122,7 +138,8 @@ impl ImageManager {
             "[ImageManager] Pulling image via docker-proxy: {}",
             image_ref
         );
-        self.pull_via_docker_proxy(image_ref, &image_dir).await?;
+        self.pull_via_docker_proxy(image_ref, &image_dir, on_progress)
+            .await?;
 
         // Save manifest for cache validation
         let manifest_path = image_dir.join("manifest.json");
@@ -180,6 +197,7 @@ impl ImageManager {
         &self,
         image_ref: &str,
         image_dir: &std::path::Path,
+        on_progress: Option<&(dyn Fn(usize, usize, &str) + Send + Sync)>,
     ) -> Result<(), ContainerError> {
         tracing::info!(
             "[ImageManager] Pulling image via docker-proxy: {}",
@@ -422,7 +440,16 @@ impl ImageManager {
             .and_then(|l| l.as_array())
             .ok_or_else(|| ContainerError::Config("Manifest missing layers array".to_string()))?;
 
-        tracing::info!("[ImageManager] Found {} layers to extract", layers.len());
+        let num_layers = layers.len();
+        // total_steps = 1 (manifest) + num_layers (download) + num_layers (extract)
+        let total_steps = 1 + 2 * num_layers;
+
+        tracing::info!("[ImageManager] Found {} layers to extract", num_layers);
+
+        // Report manifest fetch complete
+        if let Some(cb) = on_progress {
+            cb(0, total_steps, "Fetching manifest...");
+        }
 
         // 3. Fetch and extract each layer
         for (index, layer) in layers.iter().enumerate() {
@@ -496,13 +523,31 @@ impl ImageManager {
                 }));
             }
 
+            // Report download progress
+            if let Some(cb) = on_progress {
+                cb(
+                    1 + index,
+                    total_steps,
+                    &format!("Downloading layer {}/{}", index + 1, num_layers),
+                );
+            }
+
             // Extract layer
             tracing::debug!(
                 "[ImageManager] Extracting layer {}/{}",
                 index + 1,
-                layers.len()
+                num_layers
             );
             self.extract_layer(&temp_layer_path, &rootfs_path).await?;
+
+            // Report extraction progress
+            if let Some(cb) = on_progress {
+                cb(
+                    1 + num_layers + index,
+                    total_steps,
+                    &format!("Extracting layer {}/{}", index + 1, num_layers),
+                );
+            }
 
             // Cleanup temp layer file
             let _ = fs::remove_file(&temp_layer_path).await;

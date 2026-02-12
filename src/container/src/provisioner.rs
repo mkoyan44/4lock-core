@@ -33,7 +33,20 @@ impl ChannelProgressReporter {
 
 impl ProgressReporter for ChannelProgressReporter {
     fn emit(&self, percentage: u32, message: String) {
-        let progress = RuntimeStartProgress::new(self.instance_name.clone(), percentage, message);
+        self.emit_detailed(percentage, message, None, None);
+    }
+
+    fn emit_detailed(
+        &self,
+        percentage: u32,
+        message: String,
+        phase: Option<String>,
+        task_name: Option<String>,
+    ) {
+        let mut progress =
+            RuntimeStartProgress::new(self.instance_name.clone(), percentage, message);
+        progress.phase = phase;
+        progress.task_name = task_name;
         let _ = self.sender.try_send(progress);
     }
 }
@@ -41,6 +54,18 @@ impl ProgressReporter for ChannelProgressReporter {
 /// Progress reporter for provisioning operations.
 pub trait ProgressReporter: Send + Sync + 'static {
     fn emit(&self, percentage: u32, message: String);
+
+    /// Emit progress with phase and task_name metadata.
+    fn emit_detailed(
+        &self,
+        percentage: u32,
+        message: String,
+        phase: Option<String>,
+        task_name: Option<String>,
+    ) {
+        // Default: ignore phase/task_name, delegate to emit
+        self.emit(percentage, message);
+    }
 }
 
 /// Error type for provisioning operations.
