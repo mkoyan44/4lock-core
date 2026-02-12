@@ -143,60 +143,63 @@ where
                     continue;
                 }
 
-                // Stream progress and wait for final result using select! with overall timeout.
-                // IMPORTANT: Use `biased` to prefer draining progress events before checking
-                // the callback. Without this, select! randomly picks a ready branch and may
-                // skip buffered progress events when provisioning completes quickly.
-                let mut callback_future = callback_rx;
+                // Two-phase approach: first drain ALL progress events (guaranteed order),
+                // then read the callback result.
+                //
+                // Why not tokio::select! ?
+                // The intent loop drops progress_tx (closing the channel) BEFORE sending
+                // the callback via callback_tx. With select!, a closed channel returns
+                // Ready(None) immediately, starving the callback branch. With biased select,
+                // this becomes an infinite busy-loop.
+                //
+                // Phase 1: progress_rx.recv() returns Some(event) for each progress event,
+                //          then None when the channel closes (all progress consumed in order).
+                // Phase 2: callback_rx.await returns the provisioning result (already sent
+                //          before the channel closed, so it resolves immediately).
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(PROVISIONING_TIMEOUT_SECS);
-                let final_msg = loop {
-                    tokio::select! {
-                        biased;
 
+                // Phase 1: Stream all progress events until channel closes or timeout
+                let mut timed_out = false;
+                loop {
+                    tokio::select! {
                         progress = progress_rx.recv() => {
-                            if let Some(p) = progress {
-                                let msg = WireMessage::progress(
-                                    p.percentage,
-                                    p.message,
-                                    p.phase,
-                                    p.instance_name,
-                                    p.task_name,
-                                );
-                                if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
-                                    error!("Daemon: failed to send progress to {}: {}", peer, e);
-                                    break WireMessage::err(WireError::internal(
-                                        format!("Failed to send progress: {}", e),
-                                    ));
+                            match progress {
+                                Some(p) => {
+                                    let msg = WireMessage::progress(
+                                        p.percentage, p.message, p.phase, p.instance_name, p.task_name,
+                                    );
+                                    if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
+                                        error!("Daemon: failed to send progress to {}: {}", peer, e);
+                                        break;
+                                    }
                                 }
+                                None => break, // Channel closed — all progress consumed
                             }
-                            // progress channel closed — keep waiting for callback
-                        }
-                        result = &mut callback_future => {
-                            // Drain any remaining progress events before sending the terminal message.
-                            // The provisioner may have emitted events between the last recv() and now.
-                            while let Ok(p) = progress_rx.try_recv() {
-                                let msg = WireMessage::progress(
-                                    p.percentage, p.message, p.phase, p.instance_name, p.task_name,
-                                );
-                                if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
-                                    error!("Daemon: failed to send remaining progress to {}: {}", peer, e);
-                                    break;
-                                }
-                            }
-                            break match result {
-                                Ok(Ok(handle)) => WireMessage::ok_handle(handle),
-                                Ok(Err(e)) => WireMessage::err_string(e),
-                                Err(_) => WireMessage::err(WireError::internal(
-                                    "Intent loop dropped callback".into(),
-                                )),
-                            };
                         }
                         _ = tokio::time::sleep_until(deadline) => {
                             error!("Daemon: Start command timed out after {}s for {}", PROVISIONING_TIMEOUT_SECS, peer);
-                            break WireMessage::err(WireError::timeout(
-                                format!("Provisioning timed out after {}s", PROVISIONING_TIMEOUT_SECS),
-                            ));
+                            timed_out = true;
+                            break;
                         }
+                    }
+                }
+
+                // Phase 2: Get the provisioning result
+                let final_msg = if timed_out {
+                    WireMessage::err(WireError::timeout(
+                        format!("Provisioning timed out after {}s", PROVISIONING_TIMEOUT_SECS),
+                    ))
+                } else {
+                    // Callback was sent before channel closed, should resolve immediately
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), callback_rx).await {
+                        Ok(Ok(Ok(handle))) => WireMessage::ok_handle(handle),
+                        Ok(Ok(Err(e))) => WireMessage::err_string(e),
+                        Ok(Err(_)) => WireMessage::err(WireError::internal(
+                            "Intent loop dropped callback".into(),
+                        )),
+                        Err(_) => WireMessage::err(WireError::internal(
+                            "Callback not received after progress channel closed".into(),
+                        )),
                     }
                 };
                 if let Err(e) = write_ndjson_async(&mut writer_half, &final_msg).await {
@@ -218,41 +221,46 @@ where
                     continue;
                 }
 
-                let mut callback_future = callback_rx;
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(PROVISIONING_TIMEOUT_SECS);
-                let final_msg = loop {
-                    tokio::select! {
-                        biased;
 
+                // Phase 1: Stream all progress events until channel closes or timeout
+                let mut timed_out = false;
+                loop {
+                    tokio::select! {
                         progress = progress_rx.recv() => {
-                            if let Some(p) = progress {
-                                let msg = WireMessage::progress(
-                                    p.percentage, p.message, p.phase, p.instance_name, p.task_name,
-                                );
-                                let _ = write_ndjson_async(&mut writer_half, &msg).await;
+                            match progress {
+                                Some(p) => {
+                                    let msg = WireMessage::progress(
+                                        p.percentage, p.message, p.phase, p.instance_name, p.task_name,
+                                    );
+                                    let _ = write_ndjson_async(&mut writer_half, &msg).await;
+                                }
+                                None => break,
                             }
-                        }
-                        result = &mut callback_future => {
-                            while let Ok(p) = progress_rx.try_recv() {
-                                let msg = WireMessage::progress(
-                                    p.percentage, p.message, p.phase, p.instance_name, p.task_name,
-                                );
-                                let _ = write_ndjson_async(&mut writer_half, &msg).await;
-                            }
-                            break match result {
-                                Ok(Ok(handle)) => WireMessage::ok_handle(handle),
-                                Ok(Err(e)) => WireMessage::err_string(e),
-                                Err(_) => WireMessage::err(WireError::internal(
-                                    "Intent loop dropped callback".into(),
-                                )),
-                            };
                         }
                         _ = tokio::time::sleep_until(deadline) => {
                             error!("Daemon: RunContainer command timed out after {}s for {}", PROVISIONING_TIMEOUT_SECS, peer);
-                            break WireMessage::err(WireError::timeout(
-                                format!("RunContainer timed out after {}s", PROVISIONING_TIMEOUT_SECS),
-                            ));
+                            timed_out = true;
+                            break;
                         }
+                    }
+                }
+
+                // Phase 2: Get the result
+                let final_msg = if timed_out {
+                    WireMessage::err(WireError::timeout(
+                        format!("RunContainer timed out after {}s", PROVISIONING_TIMEOUT_SECS),
+                    ))
+                } else {
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), callback_rx).await {
+                        Ok(Ok(Ok(handle))) => WireMessage::ok_handle(handle),
+                        Ok(Ok(Err(e))) => WireMessage::err_string(e),
+                        Ok(Err(_)) => WireMessage::err(WireError::internal(
+                            "Intent loop dropped callback".into(),
+                        )),
+                        Err(_) => WireMessage::err(WireError::internal(
+                            "Callback not received after progress channel closed".into(),
+                        )),
                     }
                 };
                 if let Err(e) = write_ndjson_async(&mut writer_half, &final_msg).await {

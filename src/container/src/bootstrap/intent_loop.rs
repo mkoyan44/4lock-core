@@ -87,6 +87,10 @@ pub async fn run_intent_command_loop(
                     progress,
                     spec.instance_id.clone(),
                 ));
+                // provision() moves progress_reporter, dropping it (and closing the
+                // progress channel) when it returns.  The daemon relies on the channel
+                // closing BEFORE callback.send() below so it can drain all progress in
+                // order, then read the callback result.
                 let result = provisioner
                     .provision(&spec, progress_reporter)
                     .await
@@ -122,6 +126,8 @@ pub async fn run_intent_command_loop(
                     progress,
                     instance_id.to_string(),
                 ));
+                // Same ordering guarantee as Start: run_container() moves and drops
+                // progress_reporter (closing channel) before callback.send().
                 let result = provisioner
                     .run_container(&spec, progress_reporter)
                     .await
