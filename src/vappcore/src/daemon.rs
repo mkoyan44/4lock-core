@@ -143,11 +143,16 @@ where
                     continue;
                 }
 
-                // Stream progress and wait for final result using select! with overall timeout
+                // Stream progress and wait for final result using select! with overall timeout.
+                // IMPORTANT: Use `biased` to prefer draining progress events before checking
+                // the callback. Without this, select! randomly picks a ready branch and may
+                // skip buffered progress events when provisioning completes quickly.
                 let mut callback_future = callback_rx;
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(PROVISIONING_TIMEOUT_SECS);
                 let final_msg = loop {
                     tokio::select! {
+                        biased;
+
                         progress = progress_rx.recv() => {
                             if let Some(p) = progress {
                                 let msg = WireMessage::progress(
@@ -167,6 +172,17 @@ where
                             // progress channel closed — keep waiting for callback
                         }
                         result = &mut callback_future => {
+                            // Drain any remaining progress events before sending the terminal message.
+                            // The provisioner may have emitted events between the last recv() and now.
+                            while let Ok(p) = progress_rx.try_recv() {
+                                let msg = WireMessage::progress(
+                                    p.percentage, p.message, p.phase, p.instance_name, p.task_name,
+                                );
+                                if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
+                                    error!("Daemon: failed to send remaining progress to {}: {}", peer, e);
+                                    break;
+                                }
+                            }
                             break match result {
                                 Ok(Ok(handle)) => WireMessage::ok_handle(handle),
                                 Ok(Err(e)) => WireMessage::err_string(e),
@@ -206,6 +222,8 @@ where
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(PROVISIONING_TIMEOUT_SECS);
                 let final_msg = loop {
                     tokio::select! {
+                        biased;
+
                         progress = progress_rx.recv() => {
                             if let Some(p) = progress {
                                 let msg = WireMessage::progress(
@@ -215,6 +233,12 @@ where
                             }
                         }
                         result = &mut callback_future => {
+                            while let Ok(p) = progress_rx.try_recv() {
+                                let msg = WireMessage::progress(
+                                    p.percentage, p.message, p.phase, p.instance_name, p.task_name,
+                                );
+                                let _ = write_ndjson_async(&mut writer_half, &msg).await;
+                            }
                             break match result {
                                 Ok(Ok(handle)) => WireMessage::ok_handle(handle),
                                 Ok(Err(e)) => WireMessage::err_string(e),
