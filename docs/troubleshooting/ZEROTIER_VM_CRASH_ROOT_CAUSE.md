@@ -139,23 +139,33 @@ The `/dev/net/tun` device node in the container is just a file. It needs the **T
 
 ## Root Cause
 
-**Missing TUN kernel module on host VM.**
+**Privileged containers were running in user namespaces, preventing TUN/TAP ioctl operations.**
 
 ### What Was Configured Correctly
-1. ✅ Container marked as privileged
-2. ✅ Container capabilities (CAP_NET_ADMIN, CAP_NET_RAW)
+1. ✅ Container marked as `privileged: true`
+2. ✅ Container capabilities (CAP_NET_ADMIN, CAP_NET_RAW, CAP_SYS_ADMIN)
 3. ✅ /dev/net/tun device node created in container
 4. ✅ Host network mode for internet access
+5. ✅ TUN support builtin to kernel (filename: builtin)
 
-### What Was Missing
-1. ❌ TUN kernel module not loaded at boot
-2. ❌ No kernel driver to handle `/dev/net/tun` operations
+### What Was Wrong
+1. ❌ **`generate_k8s_oci_spec` ALWAYS created user namespace** ([provisioner.rs:3332](../../src/container/src/bootstrap/provisioner.rs#L3332))
+2. ❌ **User namespace isolation blocks `ioctl(TUNSETIFF)` operation** even with CAP_NET_ADMIN
+3. ❌ ZeroTier requires initial user namespace (true root) for TUN device creation
+
+### Technical Details
+- **Error**: `ioctl(TUNSETIFF): Operation not permitted`
+- **Device status**: `/dev/net/tun` exists and can be opened, but configuration ioctl fails
+- **User namespace detected**: Container in `user:[4026532209]`, host in `user:[4026531837]`
+- **UID mapping**: Container UID 0 → Host UID 0, but still in separate user namespace
 
 ### Impact Chain
 ```
-No TUN module loaded
+User namespace created for privileged container
   ↓
-ZeroTier cannot create TUN/TAP interface
+ioctl(TUNSETIFF) blocked by kernel (requires initial user namespace)
+  ↓
+ZeroTier cannot configure TUN/TAP interface
   ↓
 Network never becomes available
   ↓
@@ -170,52 +180,115 @@ System becomes unresponsive → CRASH
 
 ## The Fix
 
-### Code Change
-**File**: `4lock-iso/src/base/05-vappd-service.sh:29-31`
+### Code Changes
+
+**File 1**: `4lock-core/src/container/src/bootstrap/provisioner.rs:3331-3347`
 
 **Before**:
-```bash
-# vhost_vsock required for VSOCK
-cat << EOF | sudo tee /etc/modules-load.d/vhost_vsock.conf
-vhost_vsock
-EOF
+```rust
+let namespaces = vec![
+    json!({"type": "user"}), // Required for rootless containers
+    json!({"type": "ipc"}),
+    json!({"type": "uts"}),
+    json!({"type": "mount"}),
+];
 ```
 
 **After**:
-```bash
-# vhost_vsock required for VSOCK, tun required for ZeroTier
-cat << EOF | sudo tee /etc/modules-load.d/vhost_vsock.conf
-vhost_vsock
-tun
-EOF
+```rust
+// CRITICAL: Privileged containers running as root must NOT use user namespace
+// User namespace isolation prevents TUN/TAP ioctl operations (TUNSETIFF fails with EPERM)
+let namespaces = if privileged && nix::unistd::Uid::current().as_raw() == 0 {
+    vec![
+        json!({"type": "ipc"}),
+        json!({"type": "uts"}),
+        json!({"type": "mount"}),
+        // NO user namespace for privileged containers running as root
+    ]
+} else {
+    vec![
+        json!({"type": "user"}), // Required for rootless containers
+        json!({"type": "ipc"}),
+        json!({"type": "uts"}),
+        json!({"type": "mount"}),
+    ]
+};
 ```
 
+**File 2**: `4lock-core/src/container/src/bootstrap/provisioner.rs:3355-3400` (UID/GID mappings)
+
+**Before**:
+```rust
+let uid_mappings = vec![json!({
+    "containerID": 0,
+    "hostID": host_uid,
+    "size": 1
+})];
+let gid_mappings = vec![json!({
+    "containerID": 0,
+    "hostID": host_gid,
+    "size": 1
+})];
+```
+
+**After**:
+```rust
+let (uid_mappings, gid_mappings) = if privileged && host_uid == 0 {
+    // Privileged containers running as root: NO user namespace, NO UID/GID mappings
+    (vec![], vec![])
+} else {
+    // Rootless containers: map host UID/GID to container 0
+    (
+        vec![json!({"containerID": 0, "hostID": host_uid, "size": 1})],
+        vec![json!({"containerID": 0, "hostID": host_gid, "size": 1})]
+    )
+};
+```
+
+### Why This Works
+- **vappd runs as root** (UID 0) - verified in vappd.service
+- **ZeroTier is marked privileged** - `privileged: true` in k8s_components.rs
+- **Condition triggers**: `privileged && uid == 0` → Skip user namespace
+- **Result**: ZeroTier runs in initial user namespace with true root capabilities
+- **TUN/TAP ioctl succeeds**: `ioctl(TUNSETIFF)` allowed in initial user namespace
+
 ### Deployment Steps
-1. Rebuild ISO with updated `05-vappd-service.sh`
-2. Deploy updated ISO to VMs
-3. VMs will load TUN module at boot via systemd-modules-load.service
+1. Rebuild 4lock-core daemon (`vappc-linux-daemon`)
+2. Deploy updated daemon to VMs
+3. Restart vappd.service or reboot VM
+4. ZeroTier will now create `zt0` interface successfully
 
 ### Verification
 After deploying the fix:
 
 ```bash
-# 1. Verify TUN module loaded
-lsmod | grep tun
-# Expected: tun <size> 0
+# 1. Verify container has NO user namespace
+ps aux | grep zerotier-one | grep -v grep  # Get PID
+sudo readlink /proc/<PID>/ns/user
+sudo readlink /proc/1/ns/user
+# Expected: SAME namespace ID (both in initial user namespace)
 
 # 2. Verify TUN device exists
 ls -l /dev/net/tun
 # Expected: crw-rw-rw- 1 root root 10, 200 <date> /dev/net/tun
 
-# 3. Verify ZeroTier interface created
+# 3. Test TUN ioctl from container namespace
+sudo nsenter -t <PID> -a sh -c "ip tuntap add dev test0 mode tun && ip link show test0 && ip tuntap del dev test0 mode tun"
+# Expected: SUCCESS (no "Operation not permitted")
+
+# 4. Verify ZeroTier interface created
 ip link show zt0
 # Expected: 4: zt0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 2800 ...
 
-# 4. Verify ZeroTier network joined
-/proc/<zerotier-pid>/root/usr/sbin/zerotier-cli listnetworks
+# 5. Verify ZeroTier network joined
+sudo /proc/<zerotier-pid>/root/usr/sbin/zerotier-cli listnetworks
 # Expected: 200 listnetworks <network-id> <name> <status>
 
-# 5. VM stability test
+# 6. Check daemon logs - NO errors
+sudo cat /proc/<PID>/root/var/lib/zerotier-one/daemon.log | grep -i error
+# Expected: No "unable to configure TUN/TAP" errors
+
+# 7. VM stability test
 uptime
 # Expected: VM stays up for > 5 minutes (no crash)
 ```
@@ -244,15 +317,18 @@ uptime
 
 ## Action Items
 
-- [x] Add `tun` module to `4lock-iso/src/base/05-vappd-service.sh`
+- [x] Identify root cause (user namespace preventing TUN ioctl)
+- [x] Fix `generate_k8s_oci_spec` to skip user namespace for privileged containers
+- [x] Fix UID/GID mappings to be empty for privileged containers
 - [x] Update troubleshooting documentation
-- [ ] Rebuild ISO with fix
-- [ ] Test new ISO on fresh VM
-- [ ] Verify ZeroTier network creation
-- [ ] Verify VM stability (no crash after 5+ minutes)
-- [ ] Deploy to production VMs
-- [ ] Consider adding pre-flight TUN module check in vappd startup
-- [ ] Consider adding timeout/fail-fast to ZeroTier startup script (no infinite loop)
+- [ ] Rebuild 4lock-core daemon (`cargo build --release` in 4lock-core)
+- [ ] Deploy updated daemon to test VM
+- [ ] Verify ZeroTier creates `zt0` interface (no TUN/TAP errors)
+- [ ] Verify VM stability (no crash after 10+ minutes)
+- [ ] Test ZeroTier network connectivity (ping across VMs)
+- [ ] Deploy to all production VMs
+- [ ] Consider adding ZeroTier readiness check (wait for zt0 interface before marking provisioning complete)
+- [ ] Consider adding timeout/fail-fast to ZeroTier startup script (no infinite loop on error)
 
 ---
 

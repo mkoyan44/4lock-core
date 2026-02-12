@@ -3321,25 +3321,40 @@ exit $EXIT_CODE
         // User namespace is required by libcontainer for rootless containers
         // CRITICAL: PID namespace is NOT used for rootless containers (EPERM in rootless)
         // We use the host PID namespace instead, which is the standard approach for rootless containers
-        
+
         // Omit network namespace for host networking (per 00-os-specific-rules: containers share host network).
         // Adding network ns (even with path to join host) causes EPERM in rootless; utility containers omit it and work.
         tracing::info!(
             "[ContainerProvisioner] Omitting network namespace for {} (host network - inherit host stack)",
             config.container_name
         );
-        let namespaces = vec![
-            json!({"type": "user"}), // Required for rootless containers
-            json!({"type": "ipc"}),
-            json!({"type": "uts"}),
-            json!({"type": "mount"}),
-            // Network namespace omitted for host networking - avoids EPERM in rootless
-        ];
+
+        // CRITICAL: Privileged containers running as root must NOT use user namespace
+        // User namespace isolation prevents TUN/TAP ioctl operations (TUNSETIFF fails with EPERM)
+        // even with CAP_NET_ADMIN. ZeroTier requires initial user namespace for TUN device creation.
+        let namespaces = if privileged && nix::unistd::Uid::current().as_raw() == 0 {
+            vec![
+                json!({"type": "ipc"}),
+                json!({"type": "uts"}),
+                json!({"type": "mount"}),
+                // NO user namespace for privileged containers running as root
+            ]
+        } else {
+            vec![
+                json!({"type": "user"}), // Required for rootless containers
+                json!({"type": "ipc"}),
+                json!({"type": "uts"}),
+                json!({"type": "mount"}),
+                // Network namespace omitted for host networking - avoids EPERM in rootless
+            ]
+        };
 
         // Build UID/GID mappings for rootless containers
         // For rootless containers, we need two mappings:
         // 1. Map host UID/GID to container 0 (for root user in container)
         // 2. Map subuid/subgid range starting at 1 (for other users in container)
+        // CRITICAL: Privileged containers running as root have NO user namespace,
+        // so NO UID/GID mappings are needed (empty vectors)
         #[cfg(target_os = "linux")]
         use nix::unistd::{Gid, Uid};
         #[cfg(target_os = "linux")]
@@ -3347,52 +3362,34 @@ exit $EXIT_CODE
         #[cfg(target_os = "linux")]
         let host_gid = Gid::current().as_raw();
 
-        // Parse subuid/subgid ranges for the current user
         #[cfg(target_os = "linux")]
-        let (subuid_start, subuid_size) = Self::parse_subuid_range().unwrap_or((host_uid, 1)); // Fallback to single UID if parsing fails
+        let (uid_mappings, gid_mappings) = if privileged && host_uid == 0 {
+            // Privileged containers running as root: NO user namespace, NO UID/GID mappings
+            (vec![], vec![])
+        } else {
+            // Parse subuid/subgid ranges for the current user
+            let (subuid_start, subuid_size) = Self::parse_subuid_range().unwrap_or((host_uid, 1));
+            let (subgid_start, subgid_size) = Self::parse_subgid_range().unwrap_or((host_gid, 1));
 
-        #[cfg(target_os = "linux")]
-        let (subgid_start, subgid_size) = Self::parse_subgid_range().unwrap_or((host_gid, 1)); // Fallback to single GID if parsing fails
+            // Build UID mappings: host UID -> container 0
+            let uid_maps = vec![json!({
+                "containerID": 0,
+                "hostID": host_uid,
+                "size": 1
+            })];
 
-        // Build UID mappings: host UID -> container 0, then subuid range -> container 1+
-        #[cfg(target_os = "linux")]
-        let uid_mappings = vec![json!({
-            "containerID": 0,
-            "hostID": host_uid,
-            "size": 1
-        })];
+            // Build GID mappings: host GID -> container 0
+            let gid_maps = vec![json!({
+                "containerID": 0,
+                "hostID": host_gid,
+                "size": 1
+            })];
 
-        // Add subuid range mapping if available (containerID starts at 1)
-        // NOTE: Disabled subuid mapping - can cause EACCES in some user namespace configurations
-        // #[cfg(target_os = "linux")]
-        // if subuid_start != host_uid && subuid_size > 1 {
-        //     uid_mappings.push(json!({
-        //         "containerID": 1,
-        //         "hostID": subuid_start,
-        //         "size": subuid_size
-        //     }));
-        // }
-        let _ = (subuid_start, subuid_size); // Silence unused variable warning
+            // Silence unused variable warnings
+            let _ = (subuid_start, subuid_size, subgid_start, subgid_size);
 
-        // Build GID mappings: host GID -> container 0, then subgid range -> container 1+
-        #[cfg(target_os = "linux")]
-        let gid_mappings = vec![json!({
-            "containerID": 0,
-            "hostID": host_gid,
-            "size": 1
-        })];
-
-        // Add subgid range mapping if available (containerID starts at 1)
-        // NOTE: Disabled subgid mapping - can cause EACCES in some user namespace configurations
-        // #[cfg(target_os = "linux")]
-        // if subgid_start != host_gid && subgid_size > 1 {
-        //     gid_mappings.push(json!({
-        //         "containerID": 1,
-        //         "hostID": subgid_start,
-        //         "size": subgid_size
-        //     }));
-        // }
-        let _ = (subgid_start, subgid_size); // Silence unused variable warning
+            (uid_maps, gid_maps)
+        };
 
         #[cfg(not(target_os = "linux"))]
         let uid_mappings: Vec<serde_json::Value> = vec![];

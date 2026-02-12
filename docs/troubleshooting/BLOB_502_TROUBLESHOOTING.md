@@ -103,36 +103,51 @@ The daemon now **waits for blob `/health`** (up to 15s) before printing "ready" 
 
 ### A1. ZeroTier TUN/TAP Device Creation Failure (CRITICAL FIX)
 
-**Root Cause**: The TUN kernel module is not loaded on the VM, causing ZeroTier to fail with "unable to configure TUN/TAP device for TAP operation". This triggers an infinite loop waiting for network, exhausting VM resources and causing crashes.
+**Root Cause**: Privileged containers were running in user namespaces, preventing `ioctl(TUNSETIFF)` operations. Even with CAP_NET_ADMIN, TUN device configuration requires the initial user namespace (true root).
 
 **Symptoms**:
 - VMs crash within 1-2 minutes of boot
 - ZeroTier daemon logs show: `ERROR: unable to configure virtual network port: unable to configure TUN/TAP device for TAP operation`
+- Manual test shows: `ioctl(TUNSETIFF): Operation not permitted`
 - Startup script enters infinite loop: `Waiting for IP (iteration 12900+)`
 - No `zt0` network interface created
 
-**Container Configuration** (Already Correct):
-- ✅ ZeroTier marked as `privileged: true` in `src/container/src/bootstrap/k8s_components.rs:22`
-- ✅ Full capabilities including CAP_NET_ADMIN, CAP_NET_RAW (provisioner.rs:3744-3749)
-- ✅ `/dev/net/tun` device node created in container (provisioner.rs:3827-3836)
+**What Was Wrong**:
+- ❌ `generate_k8s_oci_spec` ALWAYS created user namespace (provisioner.rs:3332)
+- ❌ User namespace isolation blocks TUN/TAP ioctl even with capabilities
+- ✅ TUN is builtin to kernel (not a module issue)
+- ✅ /dev/net/tun exists and can be opened
+- ✅ Container has CAP_NET_ADMIN, CAP_NET_RAW
 
-**The Missing Piece**: Host kernel TUN module not loaded.
+**Fix Applied**: Modified `generate_k8s_oci_spec` to skip user namespace for privileged containers running as root (provisioner.rs:3331-3347, 3355-3400)
 
-**Fix Applied**: Added `tun` module to `/etc/modules-load.d/vhost_vsock.conf` in `4lock-iso/src/base/05-vappd-service.sh:31`
-
-```bash
-# vhost_vsock required for VSOCK, tun required for ZeroTier
-cat << EOF | sudo tee /etc/modules-load.d/vhost_vsock.conf
-vhost_vsock
-tun
-EOF
+```rust
+// Skip user namespace for privileged containers when running as root
+let namespaces = if privileged && nix::unistd::Uid::current().as_raw() == 0 {
+    vec![
+        json!({"type": "ipc"}),
+        json!({"type": "uts"}),
+        json!({"type": "mount"}),
+    ]
+} else {
+    vec![
+        json!({"type": "user"}),
+        json!({"type": "ipc"}),
+        json!({"type": "uts"}),
+        json!({"type": "mount"}),
+    ]
+};
 ```
 
 **Verification After Fix**:
-1. Rebuild ISO with updated script
-2. SSH into VM: `lsmod | grep tun` should show the module loaded
-3. ZeroTier should create `zt0` interface: `ip link show zt0`
-4. VM should remain stable (no crash within 2 minutes)
+1. Rebuild 4lock-core daemon (`vappc-linux-daemon`)
+2. Deploy to VM and restart vappd
+3. Verify no user namespace: `readlink /proc/<zerotier-pid>/ns/user` matches `/proc/1/ns/user`
+4. Test TUN ioctl: `nsenter -t <PID> -a sh -c "ip tuntap add dev test0 mode tun"` → SUCCESS
+5. ZeroTier should create `zt0` interface: `ip link show zt0`
+6. VM should remain stable (no crash)
+
+**Full Investigation**: See [ZEROTIER_VM_CRASH_ROOT_CAUSE.md](ZEROTIER_VM_CRASH_ROOT_CAUSE.md)
 
 ### B. Fix VM outbound connectivity (main fix for 502)
 
