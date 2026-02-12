@@ -99,7 +99,40 @@ journalctl -u vappd -n 200 --no-pager
 
 ### A. Ensure blob is ready before first pull (code)
 
-The daemon now **waits for blob `/health`** (up to 15s) before printing “ready” and accepting commands. That avoids “connection refused” if a Start command arrives before blob has bound. It does **not** fix 502 when upstream is unreachable.
+The daemon now **waits for blob `/health`** (up to 15s) before printing "ready" and accepting commands. That avoids "connection refused" if a Start command arrives before blob has bound. It does **not** fix 502 when upstream is unreachable.
+
+### A1. ZeroTier TUN/TAP Device Creation Failure (CRITICAL FIX)
+
+**Root Cause**: The TUN kernel module is not loaded on the VM, causing ZeroTier to fail with "unable to configure TUN/TAP device for TAP operation". This triggers an infinite loop waiting for network, exhausting VM resources and causing crashes.
+
+**Symptoms**:
+- VMs crash within 1-2 minutes of boot
+- ZeroTier daemon logs show: `ERROR: unable to configure virtual network port: unable to configure TUN/TAP device for TAP operation`
+- Startup script enters infinite loop: `Waiting for IP (iteration 12900+)`
+- No `zt0` network interface created
+
+**Container Configuration** (Already Correct):
+- ✅ ZeroTier marked as `privileged: true` in `src/container/src/bootstrap/k8s_components.rs:22`
+- ✅ Full capabilities including CAP_NET_ADMIN, CAP_NET_RAW (provisioner.rs:3744-3749)
+- ✅ `/dev/net/tun` device node created in container (provisioner.rs:3827-3836)
+
+**The Missing Piece**: Host kernel TUN module not loaded.
+
+**Fix Applied**: Added `tun` module to `/etc/modules-load.d/vhost_vsock.conf` in `4lock-iso/src/base/05-vappd-service.sh:31`
+
+```bash
+# vhost_vsock required for VSOCK, tun required for ZeroTier
+cat << EOF | sudo tee /etc/modules-load.d/vhost_vsock.conf
+vhost_vsock
+tun
+EOF
+```
+
+**Verification After Fix**:
+1. Rebuild ISO with updated script
+2. SSH into VM: `lsmod | grep tun` should show the module loaded
+3. ZeroTier should create `zt0` interface: `ip link show zt0`
+4. VM should remain stable (no crash within 2 minutes)
 
 ### B. Fix VM outbound connectivity (main fix for 502)
 
