@@ -5759,6 +5759,88 @@ users:
             tokio::time::sleep(poll).await;
         }
     }
+
+    /// Wait until docker-proxy can reach at least one upstream registry.
+    /// On a fresh VM boot the network (DHCP + DNS) may not be ready when
+    /// provisioning starts; this blocks until connectivity is confirmed or
+    /// the timeout (120 s) elapses.
+    async fn wait_for_upstream_connectivity(
+        &self,
+        progress: &Arc<dyn ProgressReporter>,
+    ) -> Result<(), ProvisionError> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        // Probe docker-proxy by requesting a lightweight manifest (alpine is tiny).
+        // Any non-502 response (200, 401, 404) proves upstream is reachable.
+        let probe_url = "http://localhost:5050/v2/library/alpine/manifests/latest";
+
+        let timeout = std::time::Duration::from_secs(120);
+        let start = std::time::Instant::now();
+        let mut attempt = 0u32;
+
+        loop {
+            let resp = client
+                .head(probe_url)
+                .header(
+                    "Accept",
+                    "application/vnd.docker.distribution.manifest.v2+json",
+                )
+                .send()
+                .await;
+
+            match resp {
+                Ok(r) if r.status().as_u16() != 502 => {
+                    tracing::info!(
+                        "[Provisioner] Upstream connectivity confirmed (status {})",
+                        r.status()
+                    );
+                    return Ok(());
+                }
+                Ok(r) => {
+                    tracing::warn!(
+                        "[Provisioner] Upstream not reachable (502), attempt {} ({:.0}s elapsed)",
+                        attempt + 1,
+                        start.elapsed().as_secs_f64()
+                    );
+                    let _ = r; // consume response
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[Provisioner] Upstream probe failed: {} (attempt {}, {:.0}s elapsed)",
+                        e,
+                        attempt + 1,
+                        start.elapsed().as_secs_f64()
+                    );
+                }
+            }
+
+            if start.elapsed() > timeout {
+                // Don't hard-fail — the manifest retry in image_manager is the real gate.
+                // Just warn and proceed; image pulls will retry on their own.
+                tracing::warn!(
+                    "[Provisioner] Upstream connectivity not confirmed after {}s, proceeding anyway",
+                    timeout.as_secs()
+                );
+                return Ok(());
+            }
+
+            attempt += 1;
+            let delay_secs = std::cmp::min(3u64 * (1 << attempt.min(2)), 10);
+            progress.emit_detailed(
+                0,
+                format!(
+                    "Waiting for network... ({:.0}s)",
+                    start.elapsed().as_secs_f64()
+                ),
+                Some("init".into()),
+                Some("network_wait".into()),
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -5786,6 +5868,15 @@ impl RuntimeProvisioner for ContainerProvisioner {
         #[cfg(target_os = "linux")]
         {
             use crate::bootstrap::k8s_components::get_zerotier_component;
+
+            // 0. Wait for upstream connectivity (network/DNS may lag on fresh VM boot)
+            progress.emit_detailed(
+                0,
+                "Checking network connectivity...".to_string(),
+                Some("init".into()),
+                Some("network_check".into()),
+            );
+            self.wait_for_upstream_connectivity(&progress).await?;
 
             // 1. Create container group (0-2%)
             progress.emit_detailed(
@@ -5990,6 +6081,15 @@ impl RuntimeProvisioner for ContainerProvisioner {
         // 60-80%: [1/1] Setting up Kubernetes... app_name
         // 80-99%: [1/1] Container started, checking readiness app_name
         // 100%:   App provisioned
+
+        // 0. Wait for upstream connectivity (network/DNS may lag on fresh VM boot)
+        progress.emit_detailed(
+            0,
+            "Checking network connectivity...".to_string(),
+            Some("init".into()),
+            Some("network_check".into()),
+        );
+        self.wait_for_upstream_connectivity(&progress).await?;
 
         // 1. Create container group (0-2%)
         progress.emit_detailed(

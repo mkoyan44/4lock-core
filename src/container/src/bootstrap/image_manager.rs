@@ -258,14 +258,16 @@ impl ImageManager {
 
         let client = reqwest::Client::new();
 
-        // Retry manifest fetch with backoff (network/DNS may not be ready on fresh VM boot)
-        const MANIFEST_MAX_RETRIES: u32 = 5;
+        // Retry manifest fetch with backoff (network/DNS may not be ready on fresh VM boot).
+        // On clean install the VM network (DHCP + DNS) may take 30-60s to become reachable,
+        // so we retry generously: 20 attempts with delays capped at 6s ≈ 2 min total.
+        const MANIFEST_MAX_RETRIES: u32 = 20;
         let mut manifest_json: serde_json::Value = {
             let mut last_error = String::new();
             let mut result = None;
             for attempt in 0..=MANIFEST_MAX_RETRIES {
                 if attempt > 0 {
-                    let delay_ms = 2000 * (1 << (attempt - 1).min(3)); // 2s, 4s, 8s, 16s, 16s
+                    let delay_ms = std::cmp::min(3000 * (1 << (attempt - 1).min(2)), 6000); // 3s, 6s, 6s, ...
                     tracing::warn!(
                         "[ImageManager] Retrying manifest fetch (attempt {}/{}): {} (waiting {}ms)",
                         attempt + 1,
@@ -475,7 +477,7 @@ impl ImageManager {
             let temp_layer_path = image_dir.join(format!("layer_{}.tar.gz", index));
 
             // Retry layer download with exponential backoff
-            const MAX_RETRIES: u32 = 3;
+            const MAX_RETRIES: u32 = 5;
             let mut last_error = None;
             let mut success = false;
 
