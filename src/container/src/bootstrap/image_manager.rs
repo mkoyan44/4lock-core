@@ -525,10 +525,10 @@ impl ImageManager {
                 }));
             }
 
-            // Report download progress
+            // Report download progress (sequential: download_i then extract_i)
             if let Some(cb) = on_progress {
                 cb(
-                    1 + index,
+                    1 + 2 * index,
                     total_steps,
                     &format!("Downloading layer {}/{}", index + 1, num_layers),
                 );
@@ -542,10 +542,10 @@ impl ImageManager {
             );
             self.extract_layer(&temp_layer_path, &rootfs_path).await?;
 
-            // Report extraction progress
+            // Report extraction progress (sequential: immediately after download)
             if let Some(cb) = on_progress {
                 cb(
-                    1 + num_layers + index,
+                    2 + 2 * index,
                     total_steps,
                     &format!("Extracting layer {}/{}", index + 1, num_layers),
                 );
