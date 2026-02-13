@@ -1,10 +1,10 @@
-//! Daemon server for vapp-core (4lock-core). Handles VappCoreCommand via NDJSON and forwards to container intent loop.
+//! Daemon server for vapp-core (4lock-core). Handles VappCoreCommand via NDJSON and forwards to app runtime intent loop.
 //! Supports Unix socket, VSOCK (--socket vsock:PORT), and TCP on loopback.
 //!
 //! ## Wire Format
 //!
 //! NDJSON (newline-delimited JSON). Each request/response is one JSON line terminated by `\n`.
-//! For streaming commands (Start, RunContainer), the daemon sends zero or more `Progress` lines
+//! For streaming commands (StartApp), the daemon sends zero or more `Progress` lines
 //! followed by exactly one terminal `Ok` or `Error` line.
 
 use crate::protocol::{VappCoreCommand, WireError, WireMessage};
@@ -19,17 +19,16 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::{debug, error, info};
 
-/// Maximum time to wait for a Start/RunContainer provisioning to complete (10 minutes).
+/// Maximum time to wait for a StartApp provisioning to complete (10 minutes).
 const PROVISIONING_TIMEOUT_SECS: u64 = 600;
 
 fn cmd_short_label(cmd: &VappCoreCommand) -> &'static str {
     match cmd {
         VappCoreCommand::Ping => "Ping",
-        VappCoreCommand::Start { .. } => "Start",
-        VappCoreCommand::RunContainer { .. } => "RunContainer",
-        VappCoreCommand::Stop { .. } => "Stop",
-        VappCoreCommand::GetState { .. } => "GetState",
-        VappCoreCommand::GetEndpoint { .. } => "GetEndpoint",
+        VappCoreCommand::StartApp { .. } => "StartApp",
+        VappCoreCommand::StopApp { .. } => "StopApp",
+        VappCoreCommand::AppState { .. } => "AppState",
+        VappCoreCommand::ListApps => "ListApps",
         VappCoreCommand::GetInterfaceIp { .. } => "GetInterfaceIp",
     }
 }
@@ -56,9 +55,7 @@ fn get_interface_ip(interface: &str) -> Result<String, String> {
     for line in stdout.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("inet ") && !trimmed.contains("inet6") {
-            // Format: inet 192.168.1.100/24 brd ...
             if let Some(ip_cidr) = trimmed.split_whitespace().nth(1) {
-                // Remove CIDR suffix
                 let ip = ip_cidr.split('/').next().unwrap_or("");
                 if !ip.is_empty() {
                     return Ok(ip.to_string());
@@ -96,7 +93,7 @@ async fn write_ndjson_async<W: AsyncWriteExt + Unpin>(
 }
 
 /// Handle multiple requests on the same connection (NDJSON: read line → parse → respond → write line).
-/// For Start/RunContainer: streams progress messages before the final response.
+/// For StartApp: streams progress messages before the final response.
 async fn handle_client<S>(stream: S, peer: String, intent_tx: mpsc::Sender<RuntimeIntent>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
@@ -108,7 +105,7 @@ where
     loop {
         line_buf.clear();
         let n = match reader.read_line(&mut line_buf).await {
-            Ok(0) => break, // Client closed connection
+            Ok(0) => break,
             Ok(n) => n,
             Err(e) => {
                 error!("Daemon: read error from {}: {}", peer, e);
@@ -129,11 +126,11 @@ where
                     break;
                 }
             }
-            Ok(VappCoreCommand::Start { spec }) => {
+            Ok(VappCoreCommand::StartApp { spec }) => {
                 let (progress_tx, mut progress_rx) = mpsc::channel::<RuntimeStartProgress>(32);
                 let (callback_tx, callback_rx) = oneshot::channel();
-                let intent = RuntimeIntent::Start {
-                    spec: Box::new(spec),
+                let intent = RuntimeIntent::StartApp {
+                    spec,
                     progress: progress_tx,
                     callback: callback_tx,
                 };
@@ -145,17 +142,6 @@ where
 
                 // Two-phase approach: first drain ALL progress events (guaranteed order),
                 // then read the callback result.
-                //
-                // Why not tokio::select! ?
-                // The intent loop drops progress_tx (closing the channel) BEFORE sending
-                // the callback via callback_tx. With select!, a closed channel returns
-                // Ready(None) immediately, starving the callback branch. With biased select,
-                // this becomes an infinite busy-loop.
-                //
-                // Phase 1: progress_rx.recv() returns Some(event) for each progress event,
-                //          then None when the channel closes (all progress consumed in order).
-                // Phase 2: callback_rx.await returns the provisioning result (already sent
-                //          before the channel closed, so it resolves immediately).
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(PROVISIONING_TIMEOUT_SECS);
 
                 // Phase 1: Stream all progress events until channel closes or timeout
@@ -173,73 +159,11 @@ where
                                         break;
                                     }
                                 }
-                                None => break, // Channel closed — all progress consumed
-                            }
-                        }
-                        _ = tokio::time::sleep_until(deadline) => {
-                            error!("Daemon: Start command timed out after {}s for {}", PROVISIONING_TIMEOUT_SECS, peer);
-                            timed_out = true;
-                            break;
-                        }
-                    }
-                }
-
-                // Phase 2: Get the provisioning result
-                let final_msg = if timed_out {
-                    WireMessage::err(WireError::timeout(
-                        format!("Provisioning timed out after {}s", PROVISIONING_TIMEOUT_SECS),
-                    ))
-                } else {
-                    // Callback was sent before channel closed, should resolve immediately
-                    match tokio::time::timeout(std::time::Duration::from_secs(5), callback_rx).await {
-                        Ok(Ok(Ok(handle))) => WireMessage::ok_handle(handle),
-                        Ok(Ok(Err(e))) => WireMessage::err_string(e),
-                        Ok(Err(_)) => WireMessage::err(WireError::internal(
-                            "Intent loop dropped callback".into(),
-                        )),
-                        Err(_) => WireMessage::err(WireError::internal(
-                            "Callback not received after progress channel closed".into(),
-                        )),
-                    }
-                };
-                if let Err(e) = write_ndjson_async(&mut writer_half, &final_msg).await {
-                    error!("Daemon: failed to send Start response to {}: {}", peer, e);
-                    break;
-                }
-            }
-            Ok(VappCoreCommand::RunContainer { spec }) => {
-                let (progress_tx, mut progress_rx) = mpsc::channel::<RuntimeStartProgress>(32);
-                let (callback_tx, callback_rx) = oneshot::channel();
-                let intent = RuntimeIntent::RunContainer {
-                    spec,
-                    progress: progress_tx,
-                    callback: callback_tx,
-                };
-                if intent_tx.send(intent).await.is_err() {
-                    let msg = WireMessage::err(WireError::internal("Intent loop disconnected".into()));
-                    let _ = write_ndjson_async(&mut writer_half, &msg).await;
-                    continue;
-                }
-
-                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(PROVISIONING_TIMEOUT_SECS);
-
-                // Phase 1: Stream all progress events until channel closes or timeout
-                let mut timed_out = false;
-                loop {
-                    tokio::select! {
-                        progress = progress_rx.recv() => {
-                            match progress {
-                                Some(p) => {
-                                    let msg = WireMessage::progress(
-                                        p.percentage, p.message, p.phase, p.instance_name, p.task_name,
-                                    );
-                                    let _ = write_ndjson_async(&mut writer_half, &msg).await;
-                                }
                                 None => break,
                             }
                         }
                         _ = tokio::time::sleep_until(deadline) => {
-                            error!("Daemon: RunContainer command timed out after {}s for {}", PROVISIONING_TIMEOUT_SECS, peer);
+                            error!("Daemon: StartApp timed out after {}s for {}", PROVISIONING_TIMEOUT_SECS, peer);
                             timed_out = true;
                             break;
                         }
@@ -249,11 +173,11 @@ where
                 // Phase 2: Get the result
                 let final_msg = if timed_out {
                     WireMessage::err(WireError::timeout(
-                        format!("RunContainer timed out after {}s", PROVISIONING_TIMEOUT_SECS),
+                        format!("StartApp timed out after {}s", PROVISIONING_TIMEOUT_SECS),
                     ))
                 } else {
                     match tokio::time::timeout(std::time::Duration::from_secs(5), callback_rx).await {
-                        Ok(Ok(Ok(handle))) => WireMessage::ok_handle(handle),
+                        Ok(Ok(Ok(handle))) => WireMessage::ok_app_handle(handle),
                         Ok(Ok(Err(e))) => WireMessage::err_string(e),
                         Ok(Err(_)) => WireMessage::err(WireError::internal(
                             "Intent loop dropped callback".into(),
@@ -264,58 +188,54 @@ where
                     }
                 };
                 if let Err(e) = write_ndjson_async(&mut writer_half, &final_msg).await {
-                    error!("Daemon: failed to send RunContainer response to {}: {}", peer, e);
+                    error!("Daemon: failed to send StartApp response to {}: {}", peer, e);
                     break;
                 }
             }
-            Ok(VappCoreCommand::Stop { instance_id }) => {
-                let intent = RuntimeIntent::Stop { instance_id };
+            Ok(VappCoreCommand::StopApp { app_id }) => {
+                let intent = RuntimeIntent::StopApp { app_id };
                 let msg = if intent_tx.send(intent).await.is_err() {
                     WireMessage::err(WireError::internal("Intent loop disconnected".into()))
                 } else {
                     WireMessage::ok_unit()
                 };
                 if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
-                    error!("Daemon: failed to send Stop response to {}: {}", peer, e);
+                    error!("Daemon: failed to send StopApp response to {}: {}", peer, e);
                     break;
                 }
             }
-            Ok(VappCoreCommand::GetState { instance_id }) => {
-                let (reply_tx, mut reply_rx) = mpsc::channel::<container::intent::InstanceState>(1);
-                let intent = RuntimeIntent::GetState {
-                    instance_id,
+            Ok(VappCoreCommand::AppState { app_id }) => {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                let intent = RuntimeIntent::AppState {
+                    app_id,
                     reply: reply_tx,
                 };
                 let msg = if intent_tx.send(intent).await.is_err() {
                     WireMessage::err(WireError::internal("Intent loop disconnected".into()))
                 } else {
-                    match reply_rx.recv().await {
-                        Some(state) => WireMessage::ok_state(state),
-                        None => WireMessage::err(WireError::internal("Intent loop did not reply".into())),
+                    match reply_rx.await {
+                        Ok(state) => WireMessage::ok_app_state(state),
+                        Err(_) => WireMessage::err(WireError::internal("Intent loop did not reply".into())),
                     }
                 };
                 if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
-                    error!("Daemon: failed to send GetState response to {}: {}", peer, e);
+                    error!("Daemon: failed to send AppState response to {}: {}", peer, e);
                     break;
                 }
             }
-            Ok(VappCoreCommand::GetEndpoint { instance_id }) => {
-                let (callback_tx, callback_rx) = oneshot::channel();
-                let intent = RuntimeIntent::GetEndpoint {
-                    instance_id,
-                    callback: callback_tx,
-                };
+            Ok(VappCoreCommand::ListApps) => {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                let intent = RuntimeIntent::ListApps { reply: reply_tx };
                 let msg = if intent_tx.send(intent).await.is_err() {
                     WireMessage::err(WireError::internal("Intent loop disconnected".into()))
                 } else {
-                    match callback_rx.await {
-                        Ok(Ok(ep)) => WireMessage::ok_endpoint(ep),
-                        Ok(Err(e)) => WireMessage::err_string(e),
-                        Err(_) => WireMessage::err(WireError::internal("Intent loop dropped callback".into())),
+                    match reply_rx.await {
+                        Ok(apps) => WireMessage::ok_app_list(apps),
+                        Err(_) => WireMessage::err(WireError::internal("Intent loop did not reply".into())),
                     }
                 };
                 if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
-                    error!("Daemon: failed to send GetEndpoint response to {}: {}", peer, e);
+                    error!("Daemon: failed to send ListApps response to {}: {}", peer, e);
                     break;
                 }
             }

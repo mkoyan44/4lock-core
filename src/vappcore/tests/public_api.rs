@@ -48,16 +48,16 @@ fn protocol_command_ping_roundtrip() {
 }
 
 #[test]
-fn protocol_command_get_state_roundtrip() {
-    let cmd = VappCoreCommand::GetState {
-        instance_id: "master-0".to_string(),
+fn protocol_command_app_state_roundtrip() {
+    let cmd = VappCoreCommand::AppState {
+        app_id: "web-1".to_string(),
     };
     let json = serde_json::to_string(&cmd).unwrap();
-    assert!(json.contains("master-0"));
+    assert!(json.contains("web-1"));
     let back: VappCoreCommand = serde_json::from_str(&json).unwrap();
     match &back {
-        VappCoreCommand::GetState { instance_id } => assert_eq!(instance_id, "master-0"),
-        _ => panic!("expected GetState"),
+        VappCoreCommand::AppState { app_id } => assert_eq!(app_id, "web-1"),
+        _ => panic!("expected AppState"),
     }
 }
 

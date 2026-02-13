@@ -166,13 +166,13 @@ fn main() {
         // Spawn hot-reload watcher (watches binary via virtio-fs mount)
         tokio::spawn(watch_binary_for_reload());
 
-        // Spawn intent command loop
+        // Spawn intent command loop (routes commands to AppRuntime)
         let intent_app_dir = app_dir.clone();
         tokio::spawn(async move {
             container::run_intent_command_loop(intent_rx, intent_app_dir).await;
         });
 
-        // Spawn CRI server
+        // Spawn CRI server (for debugging containers via crictl)
         let cri_socket = app_dir.join("cri.sock");
         let cri_app_dir = app_dir.clone();
         eprintln!("  CRI server: {} + TCP 127.0.0.1:10000", cri_socket.display());

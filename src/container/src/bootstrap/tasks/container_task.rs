@@ -1,56 +1,36 @@
-/// ContainerTask - unified task type for container operations (similar to VmTask)
-use super::kubectl_task::KubectlTask;
-use std::borrow::Cow;
+/// ContainerTask — unified task type for container operations
+use super::exec_task::ExecTask;
 use std::time::Duration;
 
-/// Unified task enum for container operations
 #[derive(Debug, Clone)]
 pub enum ContainerTask {
-    Kubectl(KubectlTask),
+    Exec(ExecTask),
 }
 
 impl ContainerTask {
-    /// Get task display name
-    pub fn display_name(&self) -> Cow<'_, str> {
+    pub fn display_name(&self) -> String {
         match self {
-            ContainerTask::Kubectl(task) => Cow::Owned(format!("kubectl/{}", task.name)),
+            ContainerTask::Exec(task) => task.display_name(),
         }
     }
 
-    /// Get normalized task ID for tracking
-    pub fn task_id(&self) -> Cow<'static, str> {
-        Cow::Owned(Self::normalize_task_name(self.display_name().as_ref()))
-    }
-
-    fn normalize_task_name(raw: &str) -> String {
-        let trimmed = raw.trim();
-        let mut normalized = if trimmed.contains('/') {
-            trimmed.replace('/', ".")
-        } else {
-            trimmed.to_owned()
-        };
-
-        if normalized.contains('-') {
-            normalized = normalized.replace('-', "_");
+    pub fn task_id(&self) -> String {
+        match self {
+            ContainerTask::Exec(task) => task.task_id(),
         }
-
-        normalized
     }
 
-    /// Get task timeout
     pub fn get_timeout(&self) -> Duration {
         match self {
-            ContainerTask::Kubectl(task) => task.get_timeout(),
+            ContainerTask::Exec(task) => task.get_timeout(),
         }
     }
 
-    /// Get task name
     pub fn get_name(&self) -> String {
-        self.display_name().into_owned()
+        self.display_name()
     }
 
-    /// Create kubectl task
-    pub fn kubectl(task: KubectlTask) -> Self {
-        ContainerTask::Kubectl(task)
+    pub fn exec(task: ExecTask) -> Self {
+        ContainerTask::Exec(task)
     }
 }

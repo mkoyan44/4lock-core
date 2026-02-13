@@ -1,5 +1,5 @@
 mod container_task;
-mod kubectl_task;
+mod exec_task;
 
 pub use container_task::ContainerTask;
-pub use kubectl_task::{KubectlAction, KubectlTask};
+pub use exec_task::ExecTask;

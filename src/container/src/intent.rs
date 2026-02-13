@@ -1,150 +1,32 @@
-//! Intent and spec types for container provisioning (4lock-core; no dependency on 4lock-agent runtime).
+//! Intent types for the app runtime (4lock-core; no dependency on 4lock-agent runtime).
+//!
+//! RuntimeIntent is the internal message enum routed via mpsc channel from the daemon to the
+//! intent loop / AppRuntime.
 
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use crate::app_spec::{AppHandle, AppSpec, AppState, AppSummary};
+use crate::progress::RuntimeStartProgress;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::progress::RuntimeStartProgress;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum InstanceRole {
-    Device,
-    App,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClusterSpec {
-    pub name: String,
-    pub service_cidr: String,
-    pub pod_cidr: String,
-    pub dns_address: String,
-    #[serde(default)]
-    pub upstream_api: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NetworkSpec {
-    pub zt_network_id: String,
-    pub zt_token: String,
-    #[serde(default)]
-    pub docker_proxy_ca_cert: Option<String>,
-    #[serde(default)]
-    pub docker_proxy_host: Option<String>,
-    #[serde(default)]
-    pub docker_proxy_port: Option<u16>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageSpec {
-    pub disk_type: String,
-    pub size_mb: u64,
-    pub mount_path: String,
-    #[serde(default)]
-    pub bind_mounts: Vec<String>,
-    #[serde(default = "default_managed_by")]
-    pub managed_by: String,
-}
-
-fn default_managed_by() -> String {
-    "vm".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceSpec {
-    pub memory_mb: u64,
-    pub cpu_cores: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VappSpec {
-    pub instance_id: String,
-    pub role: InstanceRole,
-    pub cluster: ClusterSpec,
-    pub network: NetworkSpec,
-    pub storage: Vec<StorageSpec>,
-    pub resources: ResourceSpec,
-    #[serde(default)]
-    pub kubeconfig: Option<String>,
-    #[serde(default)]
-    pub app_name: Option<String>,
-    #[serde(default)]
-    pub app_type: Option<String>,
-    #[serde(default)]
-    pub app_config: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstanceHandle {
-    pub instance_id: String,
-    pub endpoint: Endpoint,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value")]
-pub enum Endpoint {
-    Socket(PathBuf),
-    Tcp(String),
-    Vsock { cid: u32, port: u32 },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MountSpec {
-    pub host_path: String,
-    pub container_path: String,
-    #[serde(default)]
-    pub read_only: bool,
-}
-
-/// Generic container run spec for ad-hoc/debug runs (image + cmd + args + env + mounts).
-/// Used with VappCoreCommand::RunContainer and RuntimeIntent::RunContainer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerRunSpec {
-    pub image: String,
-    #[serde(default)]
-    pub command: Option<Vec<String>>,
-    #[serde(default)]
-    pub args: Option<Vec<String>>,
-    #[serde(default)]
-    pub env: Option<Vec<String>>,
-    #[serde(default)]
-    pub mounts: Option<Vec<MountSpec>>,
-    #[serde(default)]
-    pub instance_id: Option<String>,
-    #[serde(default)]
-    pub privileged: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InstanceState {
-    Provisioning { progress: u32 },
-    Running,
-    Stopped,
-    Failed { reason: String },
-}
-
-/// High-level intent - what the controller wants (used by intent loop).
+/// High-level intent — what the daemon/controller wants the runtime to do.
 #[derive(Debug)]
 pub enum RuntimeIntent {
-    Start {
-        spec: Box<VappSpec>,
+    /// Start an app from an AppSpec. Streams progress, then returns AppHandle.
+    StartApp {
+        spec: AppSpec,
         progress: mpsc::Sender<RuntimeStartProgress>,
-        callback: oneshot::Sender<Result<InstanceHandle, String>>,
+        callback: oneshot::Sender<Result<AppHandle, String>>,
     },
-    /// Run a single container from a generic spec (image, command, args, env, mounts). Used for debug/ad-hoc.
-    RunContainer {
-        spec: ContainerRunSpec,
-        progress: mpsc::Sender<RuntimeStartProgress>,
-        callback: oneshot::Sender<Result<InstanceHandle, String>>,
+    /// Stop a running app.
+    StopApp {
+        app_id: String,
     },
-    Stop {
-        instance_id: String,
+    /// Query the state of an app.
+    AppState {
+        app_id: String,
+        reply: oneshot::Sender<AppState>,
     },
-    GetState {
-        instance_id: String,
-        reply: mpsc::Sender<InstanceState>,
-    },
-    GetEndpoint {
-        instance_id: String,
-        callback: oneshot::Sender<Result<Endpoint, String>>,
+    /// List all running apps.
+    ListApps {
+        reply: oneshot::Sender<Vec<AppSummary>>,
     },
 }

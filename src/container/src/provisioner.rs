@@ -1,9 +1,6 @@
-//! Provisioner trait and error types (4lock-core; no dependency on 4lock-agent runtime).
+//! Progress reporting and error types for provisioning operations.
+//! (4lock-core; no dependency on 4lock-agent runtime.)
 
-use async_trait::async_trait;
-use std::sync::Arc;
-
-use crate::intent::{ContainerRunSpec, Endpoint, InstanceHandle, InstanceState, VappSpec};
 use crate::progress::RuntimeStartProgress;
 
 /// Channel-based progress reporter.
@@ -60,10 +57,9 @@ pub trait ProgressReporter: Send + Sync + 'static {
         &self,
         percentage: u32,
         message: String,
-        phase: Option<String>,
-        task_name: Option<String>,
+        _phase: Option<String>,
+        _task_name: Option<String>,
     ) {
-        // Default: ignore phase/task_name, delegate to emit
         self.emit(percentage, message);
     }
 }
@@ -94,48 +90,4 @@ pub enum ProvisionError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-}
-
-/// Runtime provisioner trait - container implements this.
-#[async_trait]
-pub trait RuntimeProvisioner: Send + Sync {
-    async fn provision(
-        &mut self,
-        spec: &VappSpec,
-        progress: Arc<dyn ProgressReporter>,
-    ) -> Result<InstanceHandle, ProvisionError> {
-        match spec.role {
-            crate::intent::InstanceRole::Device => self.provision_device(spec, progress).await,
-            crate::intent::InstanceRole::App => self.provision_app(spec, progress).await,
-        }
-    }
-
-    async fn provision_device(
-        &mut self,
-        spec: &VappSpec,
-        progress: Arc<dyn ProgressReporter>,
-    ) -> Result<InstanceHandle, ProvisionError>;
-
-    async fn provision_app(
-        &mut self,
-        spec: &VappSpec,
-        progress: Arc<dyn ProgressReporter>,
-    ) -> Result<InstanceHandle, ProvisionError>;
-
-    /// Run a single container from a generic spec (image, command, args, env, mounts). For debug/ad-hoc.
-    async fn run_container(
-        &mut self,
-        spec: &ContainerRunSpec,
-        progress: Arc<dyn ProgressReporter>,
-    ) -> Result<InstanceHandle, ProvisionError> {
-        let _ = (spec, progress);
-        Err(ProvisionError::Config(
-            "run_container not implemented".to_string(),
-        ))
-    }
-
-    async fn stop(&mut self, instance_id: &str) -> Result<(), String>;
-    async fn state(&self, instance_id: &str) -> Result<InstanceState, String>;
-    async fn endpoint(&self, instance_id: &str) -> Result<Endpoint, String>;
-    async fn cleanup_all(&mut self) -> Result<usize, String>;
 }

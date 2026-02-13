@@ -6,43 +6,39 @@
 //!
 //! - **Request**: One `VappCoreCommand` NDJSON line.
 //! - **Response**: One or more `WireMessage` NDJSON lines.
-//!   - For non-streaming commands (Ping, GetState, etc.): exactly one `Ok` or `Error` line.
-//!   - For streaming commands (Start, RunContainer): zero or more `Progress` lines,
+//!   - For non-streaming commands (Ping, AppState, etc.): exactly one `Ok` or `Error` line.
+//!   - For streaming commands (StartApp): zero or more `Progress` lines,
 //!     followed by exactly one `Ok` or `Error` line (the terminal message).
 
 use serde::{Deserialize, Serialize};
 
-use container::intent::{
-    ContainerRunSpec, Endpoint, InstanceHandle, InstanceState, VappSpec,
-};
+use container::app_spec::{AppHandle, AppSpec, AppState, AppSummary};
 use container::provisioner::ProvisionError;
 
 // ---------------------------------------------------------------------------
 // Commands (client → daemon)
 // ---------------------------------------------------------------------------
 
-/// Commands the daemon accepts. Unchanged from previous protocol.
+/// Commands the daemon accepts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", content = "data")]
 pub enum VappCoreCommand {
     /// Health check; daemon responds with `Ok { data: Unit }`.
     Ping,
-    Start {
-        spec: VappSpec,
+    /// Start an app from an AppSpec. Streams progress, then returns AppHandle.
+    StartApp {
+        spec: AppSpec,
     },
-    /// Run a single container from a generic spec. For debug/ad-hoc.
-    RunContainer {
-        spec: ContainerRunSpec,
+    /// Stop a running app.
+    StopApp {
+        app_id: String,
     },
-    Stop {
-        instance_id: String,
+    /// Query the state of an app.
+    AppState {
+        app_id: String,
     },
-    GetState {
-        instance_id: String,
-    },
-    GetEndpoint {
-        instance_id: String,
-    },
+    /// List all running apps.
+    ListApps,
     /// Query network interface IP address (e.g., eth0, zt0).
     GetInterfaceIp {
         interface: String,
@@ -58,7 +54,7 @@ pub enum VappCoreCommand {
 pub enum ErrorCategory {
     /// Bad configuration (spec, templates). Not retryable.
     Config,
-    /// Container/VM runtime failure. May be retryable.
+    /// Container runtime failure. May be retryable.
     Runtime,
     /// Image pull/extract failure. Usually retryable.
     Image,
@@ -66,7 +62,7 @@ pub enum ErrorCategory {
     Volume,
     /// Network connectivity issue. Usually retryable.
     Network,
-    /// Bootstrap script/task failure. Usually not retryable.
+    /// Setup task failure. Usually not retryable.
     Bootstrap,
     /// Filesystem I/O error.
     Io,
@@ -190,7 +186,7 @@ impl WireError {
         }
     }
 
-    /// Attach a provisioning phase (e.g., "etcd", "kube-apiserver", "network").
+    /// Attach a phase (e.g., "image", "container", "setup").
     pub fn with_phase(mut self, phase: impl Into<String>) -> Self {
         self.phase = Some(phase.into());
         self
@@ -226,24 +222,23 @@ pub enum WireMessage {
 }
 
 impl WireMessage {
-    /// Is this the terminal message? (Ok or Error)
     pub fn is_terminal(&self) -> bool {
         !matches!(self, WireMessage::Progress { .. })
     }
 
-    pub fn ok_handle(h: InstanceHandle) -> Self {
+    pub fn ok_app_handle(h: AppHandle) -> Self {
         WireMessage::Ok {
-            data: ResponseData::Handle(h),
+            data: ResponseData::AppHandle(h),
         }
     }
-    pub fn ok_state(s: InstanceState) -> Self {
+    pub fn ok_app_state(s: AppState) -> Self {
         WireMessage::Ok {
-            data: ResponseData::State(s),
+            data: ResponseData::AppState(s),
         }
     }
-    pub fn ok_endpoint(e: Endpoint) -> Self {
+    pub fn ok_app_list(apps: Vec<AppSummary>) -> Self {
         WireMessage::Ok {
-            data: ResponseData::Endpoint(e),
+            data: ResponseData::AppList(apps),
         }
     }
     pub fn ok_unit() -> Self {
@@ -259,7 +254,6 @@ impl WireMessage {
     pub fn err(error: WireError) -> Self {
         WireMessage::Error(error)
     }
-    /// Convenience: create an Error from a plain message (Internal category).
     pub fn err_string(message: String) -> Self {
         WireMessage::Error(WireError::internal(message))
     }
@@ -285,13 +279,12 @@ impl WireMessage {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ResponseData {
-    Handle(InstanceHandle),
-    State(InstanceState),
-    Endpoint(Endpoint),
+    AppHandle(AppHandle),
+    AppState(AppState),
+    AppList(Vec<AppSummary>),
     Unit,
     InterfaceIp {
         interface: String,
         ip: Option<String>,
     },
 }
-

@@ -1,187 +1,139 @@
-/// Container bootstrap workflow execution
+/// Generic workflow executor for container tasks.
 ///
-/// Executes bootstrap scripts inside containers using the exec API
-use crate::common::{ContainerError, ContainerRuntime};
-use crate::intent::VappSpec;
-use std::path::PathBuf;
+/// Runs a sequence of ExecTasks inside a container with progress reporting.
+/// Extracted from the K8s-specific ops.rs, generalized for any app lifecycle.
+use crate::bootstrap::tasks::ContainerTask;
+use crate::common::ContainerRuntime;
+use crate::provisioner::ProvisionError;
 use std::sync::Arc;
 
-/// Run bootstrap workflow for a container
-///
-/// Executes basic bootstrap scripts inside the container to:
-/// - Setup hostname
-/// - Configure DNS
-/// - Verify network connectivity
-/// - Prepare filesystem structure
-pub async fn run_bootstrap(
-    instance_id: &str,
-    vapp: &VappSpec,
-    _bundle_path: &PathBuf,
-    runtime: Arc<dyn ContainerRuntime>,
-) -> Result<(), ContainerError> {
-    tracing::info!(
-        "[Workflow] Running bootstrap for container: {}",
-        instance_id
-    );
-
-    tracing::info!(
-        "[Workflow] Cluster: {}, Service CIDR: {}, Pod CIDR: {}",
-        vapp.cluster.name,
-        vapp.cluster.service_cidr,
-        vapp.cluster.pod_cidr
-    );
-    tracing::info!(
-        "[Workflow] ZeroTier Network: {}",
-        vapp.network.zt_network_id
-    );
-
-    // Bootstrap script: setup basic environment
-    let bootstrap_script = format!(
-        r#"
-set -euo pipefail
-
-echo "[BOOTSTRAP] Starting bootstrap for container: {}"
-echo "[BOOTSTRAP] Cluster: {}"
-echo "[BOOTSTRAP] Service CIDR: {}"
-echo "[BOOTSTRAP] Pod CIDR: {}"
-
-# Setup hostname
-hostname {} || true
-echo "{}" > /etc/hostname || true
-
-# Create essential directories
-mkdir -p /var/lib/kubelet
-mkdir -p /etc/kubernetes
-mkdir -p /var/log
-mkdir -p /var/lib/containerd
-
-# Setup DNS (if resolv.conf exists)
-if [ -f /etc/resolv.conf ]; then
-    echo "[BOOTSTRAP] DNS configured"
-else
-    echo "nameserver 8.8.8.8" > /etc/resolv.conf || true
-    echo "nameserver 8.8.4.4" >> /etc/resolv.conf || true
-fi
-
-# Verify network connectivity
-if command -v ping >/dev/null 2>&1; then
-    ping -c 1 8.8.8.8 >/dev/null 2>&1 && echo "[BOOTSTRAP] Network connectivity verified" || echo "[BOOTSTRAP] Warning: Network connectivity check failed"
-fi
-
-echo "[BOOTSTRAP] Bootstrap completed successfully"
-"#,
-        instance_id,
-        vapp.cluster.name,
-        vapp.cluster.service_cidr,
-        vapp.cluster.pod_cidr,
-        instance_id,
-        instance_id
-    );
-
-    // Execute bootstrap script
-    let result = runtime
-        .exec(
-            instance_id,
-            &["sh".to_string(), "-c".to_string(), bootstrap_script],
-        )
-        .await
-        .map_err(|e| ContainerError::Runtime(format!("Bootstrap exec failed: {}", e)))?;
-
-    if result.exit_code != 0 {
-        return Err(ContainerError::Other(format!(
-            "Bootstrap script failed with exit code {}: {}",
-            result.exit_code, result.stderr
-        )));
-    }
-
-    tracing::info!("[Workflow] Bootstrap completed: {}", result.stdout);
-
-    Ok(())
+/// Result of task execution
+pub struct TaskResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
 }
 
-/// Setup Kubernetes in container
-///
-/// Basic Kubernetes setup (placeholder for now - full K8s setup will be implemented later)
-pub async fn setup_kubernetes(
-    instance_id: &str,
-    vapp: &VappSpec,
-    container_type: &str,
-    runtime: Arc<dyn ContainerRuntime>,
-) -> Result<(), ContainerError> {
-    tracing::info!(
-        "[Workflow] Setting up Kubernetes for container: {}",
-        instance_id
-    );
+impl TaskResult {
+    pub fn success(&self) -> bool {
+        self.exit_code == 0
+    }
+}
 
-    tracing::info!(
-        "[Workflow] Setting up Kubernetes {} with cluster: {}",
-        container_type,
-        vapp.cluster.name
-    );
-    tracing::info!(
-        "[Workflow] Service CIDR: {}, Pod CIDR: {}, DNS: {}",
-        vapp.cluster.service_cidr,
-        vapp.cluster.pod_cidr,
-        vapp.cluster.dns_address
-    );
+/// Execution context for container tasks — runs commands inside a target container via exec.
+pub struct TaskExecutor {
+    pub runtime: Arc<dyn ContainerRuntime>,
+    pub container_id: String,
+}
 
-    // Basic Kubernetes setup script (placeholder)
-    let k8s_setup_script = format!(
-        r#"
-set -euo pipefail
-
-echo "[K8S_SETUP] Setting up Kubernetes {} for cluster: {}"
-echo "[K8S_SETUP] Service CIDR: {}"
-echo "[K8S_SETUP] Pod CIDR: {}"
-echo "[K8S_SETUP] DNS Address: {}"
-
-# Create Kubernetes directories
-mkdir -p /etc/kubernetes/manifests
-mkdir -p /var/lib/kubelet
-mkdir -p /var/lib/etcd
-mkdir -p /etc/kubernetes/pki
-
-# Write cluster configuration
-cat > /etc/kubernetes/cluster.conf <<EOF
-CLUSTER_NAME={}
-SERVICE_CIDR={}
-POD_CIDR={}
-DNS_ADDRESS={}
-NODE_ROLE={}
-EOF
-
-echo "[K8S_SETUP] Kubernetes directories and config created"
-echo "[K8S_SETUP] Note: Full Kubernetes setup will be implemented in future phases"
-"#,
-        container_type,
-        vapp.cluster.name,
-        vapp.cluster.service_cidr,
-        vapp.cluster.pod_cidr,
-        vapp.cluster.dns_address,
-        vapp.cluster.name,
-        vapp.cluster.service_cidr,
-        vapp.cluster.pod_cidr,
-        vapp.cluster.dns_address,
-        container_type
-    );
-
-    // Execute Kubernetes setup script
-    let result = runtime
-        .exec(
-            instance_id,
-            &["sh".to_string(), "-c".to_string(), k8s_setup_script],
-        )
-        .await
-        .map_err(|e| ContainerError::Runtime(format!("Kubernetes setup exec failed: {}", e)))?;
-
-    if result.exit_code != 0 {
-        return Err(ContainerError::Other(format!(
-            "Kubernetes setup script failed with exit code {}: {}",
-            result.exit_code, result.stderr
-        )));
+impl TaskExecutor {
+    pub fn new(runtime: Arc<dyn ContainerRuntime>, container_id: String) -> Self {
+        Self {
+            runtime,
+            container_id,
+        }
     }
 
-    tracing::info!("[Workflow] Kubernetes setup completed: {}", result.stdout);
+    /// Execute a single task
+    pub async fn execute(&self, task: &ContainerTask) -> Result<TaskResult, ProvisionError> {
+        match task {
+            ContainerTask::Exec(exec_task) => {
+                tracing::info!(
+                    "[TaskExecutor] Executing task '{}' in container '{}'",
+                    exec_task.name,
+                    self.container_id,
+                );
+                let result = self
+                    .runtime
+                    .exec(&self.container_id, &exec_task.command)
+                    .await
+                    .map_err(|e| ProvisionError::Runtime(format!("Exec failed: {}", e)))?;
+
+                let task_result = TaskResult {
+                    exit_code: result.exit_code,
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                };
+
+                if task_result.success() {
+                    tracing::info!(
+                        "[TaskExecutor] Task '{}' completed successfully",
+                        exec_task.name,
+                    );
+                } else {
+                    tracing::error!(
+                        "[TaskExecutor] Task '{}' failed (exit {}): {}",
+                        exec_task.name,
+                        task_result.exit_code,
+                        task_result.stderr,
+                    );
+                }
+
+                Ok(task_result)
+            }
+        }
+    }
+}
+
+/// Execute a sequence of container tasks with progress tracking.
+/// Fail-fast: stops on the first task failure.
+pub async fn run_tasks<F>(
+    tasks: &[ContainerTask],
+    executor: &TaskExecutor,
+    progress_start: u32,
+    progress_end: u32,
+    progress_fn: F,
+) -> Result<(), ProvisionError>
+where
+    F: Fn(u32, &str),
+{
+    if tasks.is_empty() {
+        return Ok(());
+    }
+
+    let total_tasks = tasks.len() as u32;
+    let span = progress_end.saturating_sub(progress_start);
+
+    for (index, task) in tasks.iter().enumerate() {
+        let progress = progress_start + span.saturating_mul(index as u32) / total_tasks.max(1);
+        let display_name = task.display_name();
+
+        progress_fn(progress, &format!("Executing {}", display_name));
+
+        let task_start = std::time::Instant::now();
+        let result = executor.execute(task).await?;
+        let task_duration = task_start.elapsed();
+
+        if !result.success() {
+            let last_line = result
+                .stderr
+                .lines()
+                .last()
+                .unwrap_or("No output available");
+            tracing::warn!(
+                "[TIMING] Task {} failed after {}ms",
+                display_name,
+                task_duration.as_millis()
+            );
+            return Err(ProvisionError::Runtime(format!(
+                "Task '{}' failed (exit {}): {}",
+                display_name, result.exit_code, last_line,
+            )));
+        }
+
+        tracing::info!(
+            "[TIMING] Task {} completed in {}ms",
+            display_name,
+            task_duration.as_millis()
+        );
+
+        let completion_progress = if index + 1 < tasks.len() {
+            progress_start + span.saturating_mul((index + 1) as u32) / total_tasks.max(1)
+        } else {
+            progress_end
+        };
+        progress_fn(completion_progress, &format!("Completed {}", display_name));
+    }
 
     Ok(())
 }

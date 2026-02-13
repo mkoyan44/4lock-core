@@ -1,16 +1,15 @@
-//! Tests for the new NDJSON wire protocol: WireMessage, WireError, NDJSON transport.
+//! Tests for the NDJSON wire protocol: WireMessage, WireError, NDJSON transport.
 //!
 //! All tests are unit tests (no daemon required).
 
 use std::io::Cursor;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use vappcore::protocol::{
     ErrorCategory, ResponseData, VappCoreCommand, WireError, WireMessage,
 };
 use vappcore::client::{read_ndjson_line, send_command_streaming, write_ndjson};
-use container::intent::{Endpoint, InstanceHandle, InstanceState};
+use container::app_spec::{AppHandle, AppState, AppSummary};
 use container::provisioner::ProvisionError;
 
 // ---------------------------------------------------------------------------
@@ -35,20 +34,20 @@ fn error_category_display() {
 fn wire_error_roundtrip() {
     let err = WireError {
         category: ErrorCategory::Network,
-        message: "Failed to download kube-apiserver".to_string(),
-        phase: Some("binary-download".to_string()),
+        message: "Failed to pull image".to_string(),
+        phase: Some("image-pull".to_string()),
         is_retryable: true,
     };
 
     let json = serde_json::to_string(&err).unwrap();
     assert!(json.contains("Network"));
-    assert!(json.contains("kube-apiserver"));
-    assert!(json.contains("binary-download"));
+    assert!(json.contains("pull image"));
+    assert!(json.contains("image-pull"));
 
     let back: WireError = serde_json::from_str(&json).unwrap();
     assert_eq!(back.category, ErrorCategory::Network);
-    assert_eq!(back.message, "Failed to download kube-apiserver");
-    assert_eq!(back.phase, Some("binary-download".to_string()));
+    assert_eq!(back.message, "Failed to pull image");
+    assert_eq!(back.phase, Some("image-pull".to_string()));
     assert!(back.is_retryable);
 }
 
@@ -57,10 +56,10 @@ fn wire_error_display_with_phase() {
     let err = WireError {
         category: ErrorCategory::Runtime,
         message: "container crashed".to_string(),
-        phase: Some("etcd".to_string()),
+        phase: Some("setup".to_string()),
         is_retryable: true,
     };
-    assert_eq!(format!("{}", err), "[etcd] Runtime: container crashed");
+    assert_eq!(format!("{}", err), "[setup] Runtime: container crashed");
 }
 
 #[test]
@@ -128,36 +127,81 @@ fn wire_message_ok_unit_roundtrip() {
 }
 
 #[test]
-fn wire_message_ok_handle_roundtrip() {
-    let handle = InstanceHandle {
-        instance_id: "vapp-abc123".to_string(),
-        endpoint: Endpoint::Socket(PathBuf::from("/tmp/test.sock")),
+fn wire_message_ok_app_handle_roundtrip() {
+    let handle = AppHandle {
+        app_id: "web-1".to_string(),
+        name: "my-web-app".to_string(),
     };
-    let msg = WireMessage::ok_handle(handle);
+    let msg = WireMessage::ok_app_handle(handle);
     let json = serde_json::to_string(&msg).unwrap();
-    assert!(json.contains("vapp-abc123"));
+    assert!(json.contains("web-1"));
+    assert!(json.contains("my-web-app"));
 
     let back: WireMessage = serde_json::from_str(&json).unwrap();
     match back {
         WireMessage::Ok {
-            data: ResponseData::Handle(h),
+            data: ResponseData::AppHandle(h),
         } => {
-            assert_eq!(h.instance_id, "vapp-abc123");
+            assert_eq!(h.app_id, "web-1");
+            assert_eq!(h.name, "my-web-app");
         }
-        other => panic!("Expected Ok/Handle, got: {:?}", other),
+        other => panic!("Expected Ok/AppHandle, got: {:?}", other),
     }
 }
 
 #[test]
-fn wire_message_ok_state_roundtrip() {
-    let msg = WireMessage::ok_state(InstanceState::Running);
+fn wire_message_ok_app_state_roundtrip() {
+    let msg = WireMessage::ok_app_state(AppState::Running);
     let json = serde_json::to_string(&msg).unwrap();
     let back: WireMessage = serde_json::from_str(&json).unwrap();
     match back {
         WireMessage::Ok {
-            data: ResponseData::State(s),
-        } => assert_eq!(s, InstanceState::Running),
-        other => panic!("Expected Ok/State, got: {:?}", other),
+            data: ResponseData::AppState(s),
+        } => assert_eq!(s, AppState::Running),
+        other => panic!("Expected Ok/AppState, got: {:?}", other),
+    }
+}
+
+#[test]
+fn wire_message_ok_app_state_failed_roundtrip() {
+    let msg = WireMessage::ok_app_state(AppState::Failed { reason: "OOM".to_string() });
+    let json = serde_json::to_string(&msg).unwrap();
+    let back: WireMessage = serde_json::from_str(&json).unwrap();
+    match back {
+        WireMessage::Ok {
+            data: ResponseData::AppState(AppState::Failed { reason }),
+        } => assert_eq!(reason, "OOM"),
+        other => panic!("Expected Ok/AppState(Failed), got: {:?}", other),
+    }
+}
+
+#[test]
+fn wire_message_ok_app_list_roundtrip() {
+    let apps = vec![
+        AppSummary {
+            app_id: "web-1".to_string(),
+            name: "nginx".to_string(),
+            state: AppState::Running,
+        },
+        AppSummary {
+            app_id: "zt-1".to_string(),
+            name: "zerotier".to_string(),
+            state: AppState::Starting,
+        },
+    ];
+    let msg = WireMessage::ok_app_list(apps);
+    let json = serde_json::to_string(&msg).unwrap();
+    let back: WireMessage = serde_json::from_str(&json).unwrap();
+    match back {
+        WireMessage::Ok {
+            data: ResponseData::AppList(list),
+        } => {
+            assert_eq!(list.len(), 2);
+            assert_eq!(list[0].app_id, "web-1");
+            assert_eq!(list[1].app_id, "zt-1");
+            assert_eq!(list[1].state, AppState::Starting);
+        }
+        other => panic!("Expected Ok/AppList, got: {:?}", other),
     }
 }
 
@@ -181,8 +225,8 @@ fn wire_message_ok_interface_ip_roundtrip() {
 fn wire_message_error_roundtrip() {
     let err = WireError {
         category: ErrorCategory::Bootstrap,
-        message: "etcd failed to start".to_string(),
-        phase: Some("etcd".to_string()),
+        message: "setup task failed".to_string(),
+        phase: Some("setup".to_string()),
         is_retryable: false,
     };
     let msg = WireMessage::err(err);
@@ -194,7 +238,7 @@ fn wire_message_error_roundtrip() {
     match back {
         WireMessage::Error(e) => {
             assert_eq!(e.category, ErrorCategory::Bootstrap);
-            assert_eq!(e.message, "etcd failed to start");
+            assert_eq!(e.message, "setup task failed");
             assert!(!e.is_retryable);
         }
         other => panic!("Expected Error, got: {:?}", other),
@@ -220,8 +264,8 @@ fn wire_message_progress_roundtrip() {
         42,
         "Pulling images...".into(),
         Some("image-pull".into()),
-        Some("vapp-abc".into()),
-        Some("pull-etcd".into()),
+        Some("web-1".into()),
+        Some("pull-nginx".into()),
     );
     let json = serde_json::to_string(&msg).unwrap();
     assert!(json.contains("\"msg\":\"Progress\""));
@@ -240,8 +284,8 @@ fn wire_message_progress_roundtrip() {
             assert_eq!(percentage, 42);
             assert_eq!(message, "Pulling images...");
             assert_eq!(phase, Some("image-pull".to_string()));
-            assert_eq!(instance_name, Some("vapp-abc".to_string()));
-            assert_eq!(task_name, Some("pull-etcd".to_string()));
+            assert_eq!(instance_name, Some("web-1".to_string()));
+            assert_eq!(task_name, Some("pull-nginx".to_string()));
         }
         other => panic!("Expected Progress, got: {:?}", other),
     }
@@ -268,11 +312,11 @@ fn wire_message_progress_minimal() {
 }
 
 // ---------------------------------------------------------------------------
-// VappCoreCommand serialization (should be unchanged)
+// VappCoreCommand serialization
 // ---------------------------------------------------------------------------
 
 #[test]
-fn command_ping_unchanged() {
+fn command_ping_roundtrip() {
     let cmd = VappCoreCommand::Ping;
     let json = serde_json::to_string(&cmd).unwrap();
     assert!(json.contains("Ping"));
@@ -281,17 +325,38 @@ fn command_ping_unchanged() {
 }
 
 #[test]
-fn command_stop_unchanged() {
-    let cmd = VappCoreCommand::Stop {
-        instance_id: "vapp-123".into(),
+fn command_stop_app_roundtrip() {
+    let cmd = VappCoreCommand::StopApp {
+        app_id: "web-123".into(),
     };
     let json = serde_json::to_string(&cmd).unwrap();
-    assert!(json.contains("vapp-123"));
+    assert!(json.contains("web-123"));
     let back: VappCoreCommand = serde_json::from_str(&json).unwrap();
     match back {
-        VappCoreCommand::Stop { instance_id } => assert_eq!(instance_id, "vapp-123"),
-        _ => panic!("Expected Stop"),
+        VappCoreCommand::StopApp { app_id } => assert_eq!(app_id, "web-123"),
+        _ => panic!("Expected StopApp"),
     }
+}
+
+#[test]
+fn command_app_state_roundtrip() {
+    let cmd = VappCoreCommand::AppState {
+        app_id: "zt-1".into(),
+    };
+    let json = serde_json::to_string(&cmd).unwrap();
+    let back: VappCoreCommand = serde_json::from_str(&json).unwrap();
+    match back {
+        VappCoreCommand::AppState { app_id } => assert_eq!(app_id, "zt-1"),
+        _ => panic!("Expected AppState"),
+    }
+}
+
+#[test]
+fn command_list_apps_roundtrip() {
+    let cmd = VappCoreCommand::ListApps;
+    let json = serde_json::to_string(&cmd).unwrap();
+    let back: VappCoreCommand = serde_json::from_str(&json).unwrap();
+    assert!(matches!(back, VappCoreCommand::ListApps));
 }
 
 // ---------------------------------------------------------------------------
@@ -309,13 +374,12 @@ fn ndjson_write_appends_newline() {
 
 #[test]
 fn ndjson_write_no_internal_newlines() {
-    // Even with complex data, serde_json::to_string produces single-line JSON
-    let handle = InstanceHandle {
-        instance_id: "vapp-test".into(),
-        endpoint: Endpoint::Tcp("192.168.1.1:8080".into()),
+    let handle = AppHandle {
+        app_id: "web-test".into(),
+        name: "test-app".into(),
     };
     let mut buf = Vec::new();
-    write_ndjson(&mut buf, &WireMessage::ok_handle(handle)).unwrap();
+    write_ndjson(&mut buf, &WireMessage::ok_app_handle(handle)).unwrap();
     let s = String::from_utf8(buf).unwrap();
     // Only the trailing \n, no internal newlines
     assert_eq!(s.trim_end().matches('\n').count(), 0);
@@ -374,12 +438,12 @@ fn build_streaming_response() -> Vec<u8> {
     let mut buf = Vec::new();
     write_ndjson(
         &mut buf,
-        &WireMessage::progress(10, "Starting etcd...".into(), Some("etcd".into()), None, None),
+        &WireMessage::progress(10, "Pulling image...".into(), Some("image".into()), None, None),
     )
     .unwrap();
     write_ndjson(
         &mut buf,
-        &WireMessage::progress(50, "Starting apiserver...".into(), Some("apiserver".into()), None, None),
+        &WireMessage::progress(50, "Running setup tasks...".into(), Some("setup".into()), None, None),
     )
     .unwrap();
     write_ndjson(
@@ -389,9 +453,9 @@ fn build_streaming_response() -> Vec<u8> {
     .unwrap();
     write_ndjson(
         &mut buf,
-        &WireMessage::ok_handle(InstanceHandle {
-            instance_id: "vapp-streamed".into(),
-            endpoint: Endpoint::Socket(PathBuf::from("/tmp/test.sock")),
+        &WireMessage::ok_app_handle(AppHandle {
+            app_id: "web-streamed".into(),
+            name: "streamed-app".into(),
         }),
     )
     .unwrap();
@@ -443,18 +507,19 @@ fn streaming_collects_progress_and_returns_terminal() {
     // Check that all 3 progress callbacks were invoked
     let progress = collected.lock().unwrap();
     assert_eq!(progress.len(), 3);
-    assert_eq!(progress[0], (10, "Starting etcd...".to_string()));
-    assert_eq!(progress[1], (50, "Starting apiserver...".to_string()));
+    assert_eq!(progress[0], (10, "Pulling image...".to_string()));
+    assert_eq!(progress[1], (50, "Running setup tasks...".to_string()));
     assert_eq!(progress[2], (90, "Finalizing...".to_string()));
 
     // Check terminal response
     let msg = result.unwrap();
     assert!(msg.is_terminal());
     match msg {
-        WireMessage::Ok { data: ResponseData::Handle(h) } => {
-            assert_eq!(h.instance_id, "vapp-streamed");
+        WireMessage::Ok { data: ResponseData::AppHandle(h) } => {
+            assert_eq!(h.app_id, "web-streamed");
+            assert_eq!(h.name, "streamed-app");
         }
-        other => panic!("Expected Ok/Handle, got: {:?}", other),
+        other => panic!("Expected Ok/AppHandle, got: {:?}", other),
     }
 
     // Check the command was written as NDJSON
@@ -475,8 +540,8 @@ fn streaming_with_error_terminal() {
         &mut buf,
         &WireMessage::err(WireError {
             category: ErrorCategory::Network,
-            message: "Failed to download binary".into(),
-            phase: Some("binary-download".into()),
+            message: "Failed to pull image".into(),
+            phase: Some("image-pull".into()),
             is_retryable: true,
         }),
     )
@@ -503,7 +568,7 @@ fn streaming_with_error_terminal() {
     match msg {
         WireMessage::Error(e) => {
             assert_eq!(e.category, ErrorCategory::Network);
-            assert!(e.message.contains("download binary"));
+            assert!(e.message.contains("pull image"));
             assert!(e.is_retryable);
         }
         other => panic!("Expected Error, got: {:?}", other),
@@ -547,4 +612,3 @@ fn streaming_immediate_terminal_no_progress() {
     let result = send_command_streaming(&mut stream, VappCoreCommand::Ping, None);
     assert!(result.is_ok());
 }
-

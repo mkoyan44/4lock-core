@@ -1,13 +1,14 @@
-//! Integration test: daemon ↔ client NDJSON conversation over Unix socket.
+//! Integration test: daemon <-> client NDJSON conversation over Unix socket.
 //!
 //! Spins up a mock intent loop + daemon on a temp Unix socket, then exercises
 //! the client (VappCoreStream / send_command_streaming) against it.
 //! No real containers — just verifies the wire protocol end-to-end.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
 
-use container::intent::{Endpoint, InstanceHandle, InstanceState, RuntimeIntent};
+use container::app_spec::{AppHandle, AppSpec, AppState};
+use container::intent::RuntimeIntent;
 use container::progress::RuntimeStartProgress;
 use tokio::sync::mpsc;
 use vappcore::client::send_command_streaming;
@@ -23,13 +24,13 @@ fn temp_socket_path() -> PathBuf {
     PathBuf::from(format!("/tmp/vappcore-test-{}-{}.sock", pid, id))
 }
 
-/// A mock intent loop that handles RuntimeIntent::Start by:
+/// A mock intent loop that handles RuntimeIntent::StartApp by:
 /// 1. Sending 3 progress messages
-/// 2. Returning an InstanceHandle via callback
+/// 2. Returning an AppHandle via callback
 async fn mock_intent_loop(mut rx: mpsc::Receiver<RuntimeIntent>) {
     while let Some(intent) = rx.recv().await {
         match intent {
-            RuntimeIntent::Start {
+            RuntimeIntent::StartApp {
                 spec,
                 progress,
                 callback,
@@ -37,27 +38,27 @@ async fn mock_intent_loop(mut rx: mpsc::Receiver<RuntimeIntent>) {
                 // Send progress updates
                 let _ = progress
                     .send(RuntimeStartProgress::new(
-                        Some(spec.instance_id.clone()),
+                        Some(spec.app_id.clone()),
                         10,
-                        "Pulling images...".into(),
+                        "Pulling image...".into(),
                     ))
                     .await;
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
                 let _ = progress
                     .send(RuntimeStartProgress::new(
-                        Some(spec.instance_id.clone()),
+                        Some(spec.app_id.clone()),
                         50,
-                        "Starting etcd...".into(),
+                        "Running setup tasks...".into(),
                     ))
                     .await;
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
                 let _ = progress
                     .send(RuntimeStartProgress::new(
-                        Some(spec.instance_id.clone()),
+                        Some(spec.app_id.clone()),
                         90,
-                        "Bootstrap complete".into(),
+                        "App ready".into(),
                     ))
                     .await;
 
@@ -65,54 +66,39 @@ async fn mock_intent_loop(mut rx: mpsc::Receiver<RuntimeIntent>) {
                 drop(progress);
 
                 // Return handle
-                let handle = InstanceHandle {
-                    instance_id: spec.instance_id.clone(),
-                    endpoint: Endpoint::Socket(PathBuf::from("/tmp/mock.sock")),
+                let handle = AppHandle {
+                    app_id: spec.app_id.clone(),
+                    name: spec.name.clone(),
                 };
                 let _ = callback.send(Ok(handle));
             }
-            RuntimeIntent::Stop { .. } => {}
-            RuntimeIntent::GetState { reply, .. } => {
-                let _ = reply.send(InstanceState::Running).await;
+            RuntimeIntent::StopApp { .. } => {}
+            RuntimeIntent::AppState { reply, .. } => {
+                let _ = reply.send(AppState::Running);
             }
-            RuntimeIntent::GetEndpoint { callback, .. } => {
-                let _ = callback.send(Ok(Endpoint::Socket(PathBuf::from("/tmp/mock.sock"))));
-            }
-            RuntimeIntent::RunContainer { callback, .. } => {
-                let _ = callback.send(Err("Not implemented in mock".into()));
+            RuntimeIntent::ListApps { reply } => {
+                let _ = reply.send(vec![]);
             }
         }
     }
 }
 
-/// Build a minimal VappSpec for testing.
-fn test_vapp_spec(instance_id: &str) -> container::intent::VappSpec {
-    container::intent::VappSpec {
-        instance_id: instance_id.into(),
-        role: container::intent::InstanceRole::Device,
-        cluster: container::intent::ClusterSpec {
-            name: "test".into(),
-            service_cidr: "10.96.0.0/12".into(),
-            pod_cidr: "10.244.0.0/16".into(),
-            dns_address: "10.96.0.10".into(),
-            upstream_api: None,
-        },
-        network: container::intent::NetworkSpec {
-            zt_network_id: "".into(),
-            zt_token: "".into(),
-            docker_proxy_ca_cert: None,
-            docker_proxy_host: None,
-            docker_proxy_port: None,
-        },
-        storage: vec![],
-        resources: container::intent::ResourceSpec {
-            memory_mb: 2048,
-            cpu_cores: 2,
-        },
-        kubeconfig: None,
-        app_name: None,
-        app_type: None,
-        app_config: None,
+/// Build a minimal AppSpec for testing.
+fn test_app_spec(app_id: &str) -> AppSpec {
+    AppSpec {
+        app_id: app_id.into(),
+        name: "test-app".into(),
+        image: "alpine:latest".into(),
+        command: Some(vec!["sleep".into(), "3600".into()]),
+        args: None,
+        env: vec![],
+        mounts: vec![],
+        resources: None,
+        privileged: false,
+        working_dir: None,
+        template_vars: Default::default(),
+        config_templates: vec![],
+        setup_tasks: vec![],
     }
 }
 
@@ -166,7 +152,7 @@ async fn ndjson_ping_over_unix_socket() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ndjson_get_state_over_unix_socket() {
+async fn ndjson_app_state_over_unix_socket() {
     let socket_path = temp_socket_path();
     let socket_str = socket_path.to_str().unwrap().to_string();
 
@@ -187,19 +173,19 @@ async fn ndjson_get_state_over_unix_socket() {
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();
         let mut wrapper = VappCoreStream::new(stream);
-        wrapper.send_command(VappCoreCommand::GetState {
-            instance_id: "test-123".into(),
+        wrapper.send_command(VappCoreCommand::AppState {
+            app_id: "test-123".into(),
         })
     })
     .await
     .unwrap()
-    .expect("GetState should succeed");
+    .expect("AppState should succeed");
 
     match msg {
         WireMessage::Ok {
-            data: ResponseData::State(s),
-        } => assert_eq!(s, InstanceState::Running),
-        other => panic!("Expected Ok/State(Running), got: {:?}", other),
+            data: ResponseData::AppState(s),
+        } => assert_eq!(s, AppState::Running),
+        other => panic!("Expected Ok/AppState(Running), got: {:?}", other),
     }
 
     let _ = std::fs::remove_file(&socket_path);
@@ -221,7 +207,7 @@ async fn ndjson_streaming_start_with_progress() {
 
     wait_for_socket(&socket_path).await;
 
-    let spec = test_vapp_spec("vapp-stream-test");
+    let spec = test_app_spec("web-stream-test");
     let path = socket_path.clone();
     let collected = Arc::new(Mutex::new(Vec::new()));
     let collected_clone = collected.clone();
@@ -237,7 +223,7 @@ async fn ndjson_streaming_start_with_progress() {
 
         send_command_streaming(
             &mut stream,
-            VappCoreCommand::Start { spec },
+            VappCoreCommand::StartApp { spec },
             Some(&move |p| {
                 collected_clone
                     .lock()
@@ -260,14 +246,15 @@ async fn ndjson_streaming_start_with_progress() {
     assert!(progress[0].1.contains("Pulling"));
 
     // Verify terminal response
-    let msg = result.expect("Start should succeed");
+    let msg = result.expect("StartApp should succeed");
     match msg {
         WireMessage::Ok {
-            data: ResponseData::Handle(h),
+            data: ResponseData::AppHandle(h),
         } => {
-            assert_eq!(h.instance_id, "vapp-stream-test");
+            assert_eq!(h.app_id, "web-stream-test");
+            assert_eq!(h.name, "test-app");
         }
-        other => panic!("Expected Ok/Handle, got: {:?}", other),
+        other => panic!("Expected Ok/AppHandle, got: {:?}", other),
     }
 
     let _ = std::fs::remove_file(&socket_path);
@@ -301,8 +288,8 @@ async fn ndjson_error_response() {
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();
         let mut wrapper = VappCoreStream::new(stream);
-        wrapper.send_command(VappCoreCommand::GetState {
-            instance_id: "nonexistent".into(),
+        wrapper.send_command(VappCoreCommand::AppState {
+            app_id: "nonexistent".into(),
         })
     })
     .await

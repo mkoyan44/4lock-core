@@ -25,8 +25,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             std::process::exit(1);
         });
 
-    let cmd = VappCoreCommand::GetState {
-        instance_id: "master-0".to_string(),
+    let cmd = VappCoreCommand::AppState {
+        app_id: "web-1".to_string(),
     };
     let request = serde_json::to_vec(&cmd)?;
 

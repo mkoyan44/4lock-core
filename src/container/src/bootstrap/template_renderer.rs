@@ -200,20 +200,4 @@ impl TemplateRenderer {
         &self.templates_dir
     }
 
-    /// Create a Tera context from cluster configuration
-    pub fn create_cluster_context(
-        cluster_name: &str,
-        pod_cidr: &str,
-        service_cidr: &str,
-        dns_address: &str,
-    ) -> Context {
-        let mut context = Context::new();
-        context.insert("cluster_name", cluster_name);
-        context.insert("pod_cidr", pod_cidr);
-        context.insert("service_cidr", service_cidr);
-        context.insert("dns_address", dns_address);
-        context.insert("cluster_domain", "cluster.local");
-        context.insert("cilium_version", "v1.15.0");
-        context
-    }
 }
