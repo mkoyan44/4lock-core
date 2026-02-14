@@ -552,6 +552,21 @@ fn write_oci_spec(spec_path: &Path, spec: &AppSpec, image_dir: &Path) -> Result<
         .as_deref()
         .unwrap_or("/");
 
+    // Devices: privileged containers get /dev/net/tun for TUN/TAP (needed by ZeroTier, VPNs, etc.)
+    let linux_devices = if spec.privileged {
+        vec![json!({
+            "path": "/dev/net/tun",
+            "type": "c",
+            "major": 10,
+            "minor": 200,
+            "fileMode": 438,
+            "uid": 0,
+            "gid": 0
+        })]
+    } else {
+        vec![]
+    };
+
     let oci = json!({
         "ociVersion": "1.0.2",
         "process": {
@@ -569,6 +584,7 @@ fn write_oci_spec(spec_path: &Path, spec: &AppSpec, image_dir: &Path) -> Result<
             "namespaces": namespaces,
             "uidMappings": uid_mappings,
             "gidMappings": gid_mappings,
+            "devices": linux_devices,
             "resources": resources,
             "seccomp": null
         },
