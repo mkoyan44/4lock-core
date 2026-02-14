@@ -413,27 +413,34 @@ fn read_image_entrypoint_cmd(image_dir: &Path) -> (Vec<String>, Vec<String>) {
 fn write_oci_spec(spec_path: &Path, spec: &AppSpec, image_dir: &Path) -> Result<(), ProvisionError> {
     use serde_json::json;
 
-    let args: Vec<String> = spec
-        .command
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .chain(spec.args.clone().unwrap_or_default())
-        .collect();
-    let args: Vec<String> = if args.is_empty() {
-        // No command/args in spec — use image's Entrypoint + Cmd
-        let (entrypoint, cmd) = read_image_entrypoint_cmd(image_dir);
+    // Docker-compatible args resolution:
+    // 1. command set   → command + args (overrides both Entrypoint and Cmd)
+    // 2. args set only → image Entrypoint + args (overrides Cmd, keeps Entrypoint)
+    // 3. neither set   → image Entrypoint + image Cmd
+    // 4. fallback      → /bin/sh
+    let (entrypoint, img_cmd) = read_image_entrypoint_cmd(image_dir);
+    let args: Vec<String> = if spec.command.is_some() {
+        // Case 1: explicit command overrides everything
+        spec.command.clone().unwrap_or_default()
+            .into_iter()
+            .chain(spec.args.clone().unwrap_or_default())
+            .collect()
+    } else if spec.args.is_some() {
+        // Case 2: args only → prepend image Entrypoint (like `docker run image arg`)
+        let mut combined = entrypoint;
+        combined.extend(spec.args.clone().unwrap_or_default());
+        combined
+    } else {
+        // Case 3: neither → use image Entrypoint + Cmd
         if !entrypoint.is_empty() {
             let mut combined = entrypoint;
-            combined.extend(cmd);
+            combined.extend(img_cmd);
             combined
-        } else if !cmd.is_empty() {
-            cmd
+        } else if !img_cmd.is_empty() {
+            img_cmd
         } else {
             vec!["/bin/sh".to_string()]
         }
-    } else {
-        args
     };
 
     let mut env_vars = vec![
