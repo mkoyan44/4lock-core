@@ -16,6 +16,33 @@ use container::app_spec::{AppHandle, AppSpec, AppState, AppSummary};
 use container::provisioner::ProvisionError;
 
 // ---------------------------------------------------------------------------
+// Container group types
+// ---------------------------------------------------------------------------
+
+/// Specification for starting a group of containers sequentially.
+/// Containers are started in order; if any fails, subsequent specs are skipped (fail-fast).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerGroupSpec {
+    /// Human-readable group name (e.g., "device-group")
+    pub group_name: String,
+    /// Ordered list of AppSpecs to start sequentially.
+    /// Index 0 starts first; if it fails, index 1 is never attempted.
+    pub specs: Vec<AppSpec>,
+}
+
+/// Result of a container group start operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerGroupResult {
+    pub group_name: String,
+    /// Handles for successfully started containers (in spec order).
+    pub handles: Vec<AppHandle>,
+    /// If Some, the error that caused the group to stop.
+    /// `handles.len()` indicates how many specs succeeded before the failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<WireError>,
+}
+
+// ---------------------------------------------------------------------------
 // Commands (client → daemon)
 // ---------------------------------------------------------------------------
 
@@ -42,6 +69,11 @@ pub enum VappCoreCommand {
     /// Query network interface IP address (e.g., eth0, zt0).
     GetInterfaceIp {
         interface: String,
+    },
+    /// Start a group of containers sequentially. Streams interleaved progress,
+    /// then returns ContainerGroupResult (which may include partial success).
+    StartContainerGroup {
+        group: ContainerGroupSpec,
     },
 }
 
@@ -251,6 +283,11 @@ impl WireMessage {
             data: ResponseData::InterfaceIp { interface, ip },
         }
     }
+    pub fn ok_container_group(result: ContainerGroupResult) -> Self {
+        WireMessage::Ok {
+            data: ResponseData::ContainerGroup(result),
+        }
+    }
     pub fn err(error: WireError) -> Self {
         WireMessage::Error(error)
     }
@@ -287,4 +324,5 @@ pub enum ResponseData {
         interface: String,
         ip: Option<String>,
     },
+    ContainerGroup(ContainerGroupResult),
 }

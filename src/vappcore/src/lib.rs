@@ -6,5 +6,6 @@ pub mod protocol;
 
 pub use client::{VappCorePing, VappCoreStream};
 pub use protocol::{
-    ErrorCategory, ResponseData, VappCoreCommand, WireError, WireMessage,
+    ContainerGroupResult, ContainerGroupSpec, ErrorCategory, ResponseData, VappCoreCommand,
+    WireError, WireMessage,
 };

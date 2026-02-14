@@ -7,7 +7,7 @@
 //! For streaming commands (StartApp), the daemon sends zero or more `Progress` lines
 //! followed by exactly one terminal `Ok` or `Error` line.
 
-use crate::protocol::{VappCoreCommand, WireError, WireMessage};
+use crate::protocol::{ContainerGroupResult, VappCoreCommand, WireError, WireMessage};
 use container::intent::RuntimeIntent;
 use container::progress::RuntimeStartProgress;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -30,6 +30,7 @@ fn cmd_short_label(cmd: &VappCoreCommand) -> &'static str {
         VappCoreCommand::AppState { .. } => "AppState",
         VappCoreCommand::ListApps => "ListApps",
         VappCoreCommand::GetInterfaceIp { .. } => "GetInterfaceIp",
+        VappCoreCommand::StartContainerGroup { .. } => "StartContainerGroup",
     }
 }
 
@@ -246,6 +247,156 @@ where
                 };
                 if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
                     error!("Daemon: failed to send GetInterfaceIp response to {}: {}", peer, e);
+                    break;
+                }
+            }
+            Ok(VappCoreCommand::StartContainerGroup { group }) => {
+                let group_name = group.group_name.clone();
+                let total_specs = group.specs.len();
+                info!(
+                    "Daemon: StartContainerGroup '{}' with {} specs from {}",
+                    group_name, total_specs, peer
+                );
+
+                if group.specs.is_empty() {
+                    let result = ContainerGroupResult {
+                        group_name,
+                        handles: Vec::new(),
+                        error: None,
+                    };
+                    let msg = WireMessage::ok_container_group(result);
+                    if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
+                        error!("Daemon: failed to send empty group response to {}: {}", peer, e);
+                        break;
+                    }
+                    continue;
+                }
+
+                let mut handles = Vec::new();
+                let mut group_error: Option<WireError> = None;
+                let mut write_failed = false;
+
+                for (idx, spec) in group.specs.into_iter().enumerate() {
+                    let spec_app_id = spec.app_id.clone();
+                    info!(
+                        "Daemon: StartContainerGroup[{}] starting spec {}/{}: {}",
+                        group_name,
+                        idx + 1,
+                        total_specs,
+                        spec_app_id
+                    );
+
+                    let (progress_tx, mut progress_rx) = mpsc::channel::<RuntimeStartProgress>(32);
+                    let (callback_tx, callback_rx) = oneshot::channel();
+                    let intent = RuntimeIntent::StartApp {
+                        spec,
+                        progress: progress_tx,
+                        callback: callback_tx,
+                    };
+
+                    if intent_tx.send(intent).await.is_err() {
+                        group_error = Some(WireError::internal("Intent loop disconnected".into()));
+                        break;
+                    }
+
+                    // Drain progress (same pattern as StartApp)
+                    let deadline = tokio::time::Instant::now()
+                        + std::time::Duration::from_secs(PROVISIONING_TIMEOUT_SECS);
+                    let mut timed_out = false;
+
+                    loop {
+                        tokio::select! {
+                            progress = progress_rx.recv() => {
+                                match progress {
+                                    Some(p) => {
+                                        let msg = WireMessage::progress(
+                                            p.percentage, p.message, p.phase,
+                                            p.instance_name, p.task_name,
+                                        );
+                                        if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
+                                            error!("Daemon: failed to send group progress to {}: {}", peer, e);
+                                            write_failed = true;
+                                            break;
+                                        }
+                                    }
+                                    None => break, // channel closed, spec finished
+                                }
+                            }
+                            _ = tokio::time::sleep_until(deadline) => {
+                                timed_out = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if write_failed {
+                        break;
+                    }
+
+                    if timed_out {
+                        group_error = Some(WireError::timeout(format!(
+                            "StartContainerGroup: spec {} ({}) timed out after {}s",
+                            idx, spec_app_id, PROVISIONING_TIMEOUT_SECS
+                        )));
+                        break; // fail-fast
+                    }
+
+                    // Read callback result
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), callback_rx).await
+                    {
+                        Ok(Ok(Ok(handle))) => {
+                            info!(
+                                "Daemon: StartContainerGroup[{}] spec {}/{} ({}) succeeded",
+                                group_name,
+                                idx + 1,
+                                total_specs,
+                                spec_app_id
+                            );
+                            handles.push(handle);
+                        }
+                        Ok(Ok(Err(e))) => {
+                            group_error = Some(
+                                WireError::internal(e)
+                                    .with_phase(format!("spec[{}]:{}", idx, spec_app_id)),
+                            );
+                            break; // fail-fast
+                        }
+                        Ok(Err(_)) => {
+                            group_error = Some(WireError::internal(
+                                "Intent loop dropped callback".into(),
+                            ));
+                            break;
+                        }
+                        Err(_) => {
+                            group_error = Some(WireError::internal(
+                                "Callback not received after progress channel closed".into(),
+                            ));
+                            break;
+                        }
+                    }
+                }
+
+                if write_failed {
+                    break; // connection lost, exit client loop
+                }
+
+                let result = ContainerGroupResult {
+                    group_name: group_name.clone(),
+                    handles,
+                    error: group_error,
+                };
+                info!(
+                    "Daemon: StartContainerGroup '{}' complete: {} handles, error={}",
+                    group_name,
+                    result.handles.len(),
+                    result.error.is_some()
+                );
+                let msg = WireMessage::ok_container_group(result);
+                if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
+                    error!(
+                        "Daemon: failed to send group result to {}: {}",
+                        peer, e
+                    );
                     break;
                 }
             }

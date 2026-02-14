@@ -6,7 +6,8 @@ use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
 use vappcore::protocol::{
-    ErrorCategory, ResponseData, VappCoreCommand, WireError, WireMessage,
+    ContainerGroupResult, ContainerGroupSpec, ErrorCategory, ResponseData, VappCoreCommand,
+    WireError, WireMessage,
 };
 use vappcore::client::{read_ndjson_line, send_command_streaming, write_ndjson};
 use container::app_spec::{AppHandle, AppState, AppSummary};
@@ -611,4 +612,241 @@ fn streaming_immediate_terminal_no_progress() {
 
     let result = send_command_streaming(&mut stream, VappCoreCommand::Ping, None);
     assert!(result.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// ContainerGroup types
+// ---------------------------------------------------------------------------
+
+#[test]
+fn container_group_spec_roundtrip() {
+    let spec = ContainerGroupSpec {
+        group_name: "device-group".to_string(),
+        specs: vec![
+            container::app_spec::AppSpec {
+                app_id: "dev-1".to_string(),
+                name: "device".to_string(),
+                image: "alpine:latest".to_string(),
+                command: None,
+                args: None,
+                env: vec![],
+                mounts: vec![],
+                resources: None,
+                privileged: false,
+                working_dir: None,
+                template_vars: Default::default(),
+                config_templates: vec![],
+                setup_tasks: vec![],
+            },
+        ],
+    };
+    let json = serde_json::to_string(&spec).unwrap();
+    assert!(json.contains("device-group"));
+    let back: ContainerGroupSpec = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.group_name, "device-group");
+    assert_eq!(back.specs.len(), 1);
+    assert_eq!(back.specs[0].app_id, "dev-1");
+}
+
+#[test]
+fn container_group_result_success_roundtrip() {
+    let result = ContainerGroupResult {
+        group_name: "test-group".to_string(),
+        handles: vec![
+            AppHandle {
+                app_id: "dev-1".to_string(),
+                name: "device".to_string(),
+            },
+            AppHandle {
+                app_id: "dev-1-zt".to_string(),
+                name: "zerotier".to_string(),
+            },
+        ],
+        error: None,
+    };
+    let msg = WireMessage::ok_container_group(result);
+    let json = serde_json::to_string(&msg).unwrap();
+    assert!(json.contains("test-group"));
+    assert!(json.contains("dev-1-zt"));
+    // error field should be omitted
+    assert!(!json.contains("\"error\""));
+
+    let back: WireMessage = serde_json::from_str(&json).unwrap();
+    assert!(back.is_terminal());
+    match back {
+        WireMessage::Ok {
+            data: ResponseData::ContainerGroup(r),
+        } => {
+            assert_eq!(r.group_name, "test-group");
+            assert_eq!(r.handles.len(), 2);
+            assert_eq!(r.handles[0].app_id, "dev-1");
+            assert_eq!(r.handles[1].name, "zerotier");
+            assert!(r.error.is_none());
+        }
+        other => panic!("Expected Ok/ContainerGroup, got: {:?}", other),
+    }
+}
+
+#[test]
+fn container_group_result_partial_failure_roundtrip() {
+    let result = ContainerGroupResult {
+        group_name: "test-group".to_string(),
+        handles: vec![AppHandle {
+            app_id: "dev-1".to_string(),
+            name: "device".to_string(),
+        }],
+        error: Some(WireError {
+            category: ErrorCategory::Runtime,
+            message: "zerotier failed to start".to_string(),
+            phase: Some("spec[1]:dev-1-zt".to_string()),
+            is_retryable: true,
+        }),
+    };
+    let msg = WireMessage::ok_container_group(result);
+    let json = serde_json::to_string(&msg).unwrap();
+    assert!(json.contains("\"error\""));
+
+    let back: WireMessage = serde_json::from_str(&json).unwrap();
+    match back {
+        WireMessage::Ok {
+            data: ResponseData::ContainerGroup(r),
+        } => {
+            assert_eq!(r.handles.len(), 1);
+            assert!(r.error.is_some());
+            let err = r.error.unwrap();
+            assert_eq!(err.category, ErrorCategory::Runtime);
+            assert!(err.message.contains("zerotier"));
+            assert!(err.is_retryable);
+        }
+        other => panic!("Expected Ok/ContainerGroup, got: {:?}", other),
+    }
+}
+
+#[test]
+fn command_start_container_group_roundtrip() {
+    let cmd = VappCoreCommand::StartContainerGroup {
+        group: ContainerGroupSpec {
+            group_name: "device-vapp-abc".to_string(),
+            specs: vec![],
+        },
+    };
+    let json = serde_json::to_string(&cmd).unwrap();
+    assert!(json.contains("StartContainerGroup"));
+    assert!(json.contains("device-vapp-abc"));
+
+    let back: VappCoreCommand = serde_json::from_str(&json).unwrap();
+    match back {
+        VappCoreCommand::StartContainerGroup { group } => {
+            assert_eq!(group.group_name, "device-vapp-abc");
+            assert!(group.specs.is_empty());
+        }
+        _ => panic!("Expected StartContainerGroup"),
+    }
+}
+
+#[test]
+fn streaming_container_group_interleaved_progress() {
+    // Simulate daemon streaming progress from two specs, then a group result
+    let mut buf = Vec::new();
+    write_ndjson(
+        &mut buf,
+        &WireMessage::progress(
+            20,
+            "Pulling alpine...".into(),
+            Some("image".into()),
+            Some("dev-1".into()),
+            None,
+        ),
+    )
+    .unwrap();
+    write_ndjson(
+        &mut buf,
+        &WireMessage::progress(
+            100,
+            "Device started".into(),
+            None,
+            Some("dev-1".into()),
+            None,
+        ),
+    )
+    .unwrap();
+    write_ndjson(
+        &mut buf,
+        &WireMessage::progress(
+            20,
+            "Pulling zerotier...".into(),
+            Some("image".into()),
+            Some("dev-1-zt".into()),
+            None,
+        ),
+    )
+    .unwrap();
+    write_ndjson(
+        &mut buf,
+        &WireMessage::progress(
+            100,
+            "ZeroTier started".into(),
+            None,
+            Some("dev-1-zt".into()),
+            None,
+        ),
+    )
+    .unwrap();
+    write_ndjson(
+        &mut buf,
+        &WireMessage::ok_container_group(ContainerGroupResult {
+            group_name: "device-dev-1".into(),
+            handles: vec![
+                AppHandle {
+                    app_id: "dev-1".into(),
+                    name: "device".into(),
+                },
+                AppHandle {
+                    app_id: "dev-1-zt".into(),
+                    name: "zerotier".into(),
+                },
+            ],
+            error: None,
+        }),
+    )
+    .unwrap();
+
+    let mut stream = FakeStream {
+        response_data: Cursor::new(buf),
+        written: Vec::new(),
+    };
+
+    let collected = Arc::new(Mutex::new(Vec::new()));
+    let collected_clone = collected.clone();
+
+    let result = send_command_streaming(
+        &mut stream,
+        VappCoreCommand::Ping,
+        Some(&move |progress| {
+            collected_clone
+                .lock()
+                .unwrap()
+                .push((progress.instance_name.clone(), progress.percentage));
+        }),
+    );
+
+    let progress = collected.lock().unwrap();
+    assert_eq!(progress.len(), 4);
+    assert_eq!(progress[0], (Some("dev-1".into()), 20));
+    assert_eq!(progress[1], (Some("dev-1".into()), 100));
+    assert_eq!(progress[2], (Some("dev-1-zt".into()), 20));
+    assert_eq!(progress[3], (Some("dev-1-zt".into()), 100));
+
+    let msg = result.unwrap();
+    assert!(msg.is_terminal());
+    match msg {
+        WireMessage::Ok {
+            data: ResponseData::ContainerGroup(r),
+        } => {
+            assert_eq!(r.group_name, "device-dev-1");
+            assert_eq!(r.handles.len(), 2);
+            assert!(r.error.is_none());
+        }
+        other => panic!("Expected Ok/ContainerGroup, got: {:?}", other),
+    }
 }
