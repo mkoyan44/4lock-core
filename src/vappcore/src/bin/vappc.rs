@@ -123,6 +123,19 @@ fn main() {
     let result: anyhow::Result<()> = rt.block_on(async {
         let (intent_tx, intent_rx) = mpsc::channel(32);
 
+        // Ensure docker-proxy.internal resolves to the correct host.
+        // On Linux (same host as agent): 127.0.0.1
+        // On VM (macOS/Windows guest): default gateway IP (host runs blob on 0.0.0.0:5050)
+        {
+            let target_ip = detect_gateway_ip().unwrap_or_else(|| "127.0.0.1".to_string());
+            if let Err(e) = add_hosts_entry(&target_ip, "docker-proxy.internal") {
+                tracing::warn!("Failed to add docker-proxy.internal to /etc/hosts: {}", e);
+                eprintln!("  WARNING: Could not add docker-proxy.internal -> {} to /etc/hosts: {}", target_ip, e);
+            } else {
+                eprintln!("  DNS: docker-proxy.internal -> {}", target_ip);
+            }
+        }
+
         // Wait for the host-level blob (docker-proxy) server started by 4lock-agent.
         // The agent starts blob on the host before booting VMs; this daemon just
         // needs to confirm it is reachable before accepting image-pull commands.
@@ -213,5 +226,46 @@ fn main() {
     if let Err(e) = result {
         tracing::error!("Daemon failed: {}", e);
         std::process::exit(1);
+    }
+
+    /// Detect the default gateway IP from `ip route`.
+    fn detect_gateway_ip() -> Option<String> {
+        let output = std::process::Command::new("ip")
+            .args(["route", "show", "default"])
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Parse: "default via 192.168.64.1 dev eth0 ..."
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 && parts[0] == "default" && parts[1] == "via" {
+                return Some(parts[2].to_string());
+            }
+        }
+        None
+    }
+
+    /// Add a hostname entry to /etc/hosts if not already present.
+    fn add_hosts_entry(ip: &str, hostname: &str) -> std::io::Result<()> {
+        let contents = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
+        // Check if already present
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 && parts[1..].contains(&hostname) {
+                // Already present
+                return Ok(());
+            }
+        }
+        // Append entry
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open("/etc/hosts")?;
+        writeln!(file, "{}\t{}", ip, hostname)?;
+        Ok(())
     }
 }
