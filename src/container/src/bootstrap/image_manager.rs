@@ -32,14 +32,12 @@ impl ImageManager {
         })
     }
 
-    /// Detect docker-proxy URL by trying both ports
+    /// Resolve the docker-proxy base URL.
     ///
-    /// Docker-proxy runs on:
-    /// - Port 5051 (HTTP) if HTTPS is enabled on 5050
-    /// - Port 5050 (HTTP) if no HTTPS (HTTP-only mode)
-    ///
-    /// Returns the first working URL, or defaults to http://localhost:5050
-    async fn detect_docker_proxy_url(&self) -> String {
+    /// The agent's blob server always runs on port 5050:
+    /// - VM: reachable via `docker-proxy.internal` (gateway IP, resolved by bootstrap DNS)
+    /// - Linux: reachable via `127.0.0.1` (same host)
+    fn detect_docker_proxy_url(&self) -> String {
         // Return cached URL if available
         {
             let cached = self.docker_proxy_url.lock().unwrap();
@@ -48,49 +46,8 @@ impl ImageManager {
             }
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(2))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-
-        // Try port 5051 first (HTTP when HTTPS is enabled)
-        let test_url_5051 = "http://localhost:5051/health";
-        if client.get(test_url_5051).send().await.is_ok() {
-            let url = "http://localhost:5051".to_string();
-            tracing::info!("[ImageManager] Docker-proxy detected on port 5051 (HTTP)");
-            *self.docker_proxy_url.lock().unwrap() = Some(url.clone());
-            return url;
-        }
-
-        // Try port 5050 (HTTP when no HTTPS, or HTTPS if certs available)
-        let test_url_5050_http = "http://localhost:5050/health";
-        if client.get(test_url_5050_http).send().await.is_ok() {
-            let url = "http://localhost:5050".to_string();
-            tracing::info!("[ImageManager] Docker-proxy detected on port 5050 (HTTP)");
-            *self.docker_proxy_url.lock().unwrap() = Some(url.clone());
-            return url;
-        }
-
-        // Try port 5050 with HTTPS (if certs available)
-        let test_url_5050_https = "https://localhost:5050/health";
-        let https_client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true) // Accept self-signed certs
-            .timeout(std::time::Duration::from_secs(2))
-            .build();
-        if let Ok(https_client) = https_client {
-            if https_client.get(test_url_5050_https).send().await.is_ok() {
-                let url = "https://localhost:5050".to_string();
-                tracing::info!("[ImageManager] Docker-proxy detected on port 5050 (HTTPS)");
-                *self.docker_proxy_url.lock().unwrap() = Some(url.clone());
-                return url;
-            }
-        }
-
-        // Default to HTTP port 5050 (most common case)
-        tracing::warn!(
-            "[ImageManager] Could not detect docker-proxy port, defaulting to http://localhost:5050"
-        );
-        let url = "http://localhost:5050".to_string();
+        let url = "http://docker-proxy.internal:5050".to_string();
+        tracing::info!("[ImageManager] Docker-proxy URL: {}", url);
         *self.docker_proxy_url.lock().unwrap() = Some(url.clone());
         url
     }
@@ -243,7 +200,7 @@ impl ImageManager {
         // - If HTTPS is enabled: runs on 5050 (HTTPS) and 5051 (HTTP)
         // - If no HTTPS: runs on 5050 (HTTP only)
         // Try both ports and use whichever is available
-        let docker_proxy_base = self.detect_docker_proxy_url().await;
+        let docker_proxy_base = self.detect_docker_proxy_url();
 
         // 1. Fetch manifest
         let manifest_url = format!(

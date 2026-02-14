@@ -117,50 +117,46 @@ fn main() {
 
     std::fs::create_dir_all(&app_dir).expect("create app_dir");
 
-    // Create blob cache dir (docker-proxy needs this for image pull-through cache)
-    let blob_cache_dir = app_dir.join("blob-cache");
-    std::fs::create_dir_all(&blob_cache_dir).expect("create blob-cache dir");
-
     // Create runtime FIRST, then spawn tasks within it
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
     let result: anyhow::Result<()> = rt.block_on(async {
         let (intent_tx, intent_rx) = mpsc::channel(32);
 
-        // Spawn blob (docker-proxy) server - required for image pulls (alpine, K8s images, etc.)
-        let blob_cache = blob_cache_dir.clone();
-        let _blob_handle = tokio::spawn(async move {
-            use blob::{start_server, Config};
-            match start_server(blob_cache, Config::default(), None, None).await {
-                Ok(handle) => {
-                    eprintln!("  Blob (docker-proxy): listening on 0.0.0.0:5050");
-                    info!("Blob (docker-proxy) server started on 0.0.0.0:5050");
-                    let _ = handle.await;
-                }
-                Err(e) => {
-                    tracing::error!("Blob (docker-proxy) failed to start: {}", e);
-                    eprintln!("  Blob (docker-proxy): FAILED - {}", e);
-                }
-            }
-        });
+        // Wait for the host-level blob (docker-proxy) server started by 4lock-agent.
+        // The agent starts blob on the host before booting VMs; this daemon just
+        // needs to confirm it is reachable before accepting image-pull commands.
+        // docker-proxy.internal resolves to the gateway IP (VM) or 127.0.0.1 (Linux).
+        {
+            let proxy_url = "http://docker-proxy.internal:5050/health";
+            eprintln!("  Blob (docker-proxy): waiting for host server at {}", proxy_url);
 
-        // Wait for blob (docker-proxy) to be ready before accepting commands (avoids early pulls hitting connection refused)
-        const BLOB_READY_TIMEOUT_MS: u64 = 15_000;
-        const BLOB_READY_POLL_MS: u64 = 200;
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(500))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(BLOB_READY_TIMEOUT_MS);
-        while tokio::time::Instant::now() < deadline {
-            if client.get("http://127.0.0.1:5050/health").send().await.map(|r| r.status().is_success()).unwrap_or(false) {
-                info!("Blob (docker-proxy) ready");
-                break;
+            const BLOB_READY_TIMEOUT_MS: u64 = 30_000;
+            const BLOB_READY_POLL_MS: u64 = 500;
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_millis(2_000))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
+            let deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_millis(BLOB_READY_TIMEOUT_MS);
+
+            let mut ready = false;
+            while tokio::time::Instant::now() < deadline {
+                if client.get(proxy_url).send().await.map(|r| r.status().is_success()).unwrap_or(false) {
+                    info!("Blob (docker-proxy) host server ready at {}", proxy_url);
+                    eprintln!("  Blob (docker-proxy): host server ready");
+                    ready = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(BLOB_READY_POLL_MS)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(BLOB_READY_POLL_MS)).await;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            tracing::warn!("Blob (docker-proxy) did not become ready within {}ms; image pulls may fail", BLOB_READY_TIMEOUT_MS);
+            if !ready {
+                tracing::warn!(
+                    "Blob (docker-proxy) host server not reachable at {} within {}ms; image pulls may fail",
+                    proxy_url, BLOB_READY_TIMEOUT_MS
+                );
+                eprintln!("  Blob (docker-proxy): WARNING — host server not reachable, image pulls may fail");
+            }
         }
 
         // Spawn hot-reload watcher (watches binary via virtio-fs mount)

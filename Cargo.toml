@@ -7,13 +7,12 @@
 name = "daemon"
 version = "0.1.0"
 edition = "2021"
-description = "4lock-core daemon workspace root (blob, container, vappcore)"
+description = "4lock-core daemon workspace root (container, vappcore)"
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
-blob = { path = "src/blob" }
 container = { path = "src/container" }
 vappcore = { path = "src/vappcore" }
 

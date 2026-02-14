@@ -16,7 +16,6 @@ name = "vapp-core-daemon"
 path = "src/bin/vappc.rs"
 
 [dependencies]
-blob = { path = "../blob" }
 container = { path = "../container" }
 
 clap = { version = "4", features = ["derive"] }
