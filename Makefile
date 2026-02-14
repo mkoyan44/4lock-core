@@ -46,6 +46,8 @@ default: from-scratch
 # -----------------------------------------------------------------------------
 nerdctl-build:
 	nerdctl build -f docker/dockerfiles/Dockerfile.core $(COMPOSED_BUILD_ARGS) -t ${IMAGE_NAME}:${IMAGE_TAG} .
+	@mkdir -p target/release
+	nerdctl build -f docker/dockerfiles/Dockerfile.core $(COMPOSED_BUILD_ARGS) --target export --output type=local,dest=target/release .
 
 nerdctl-push:
 	@test -n "$(GH_OWNER)" || (echo "GH_OWNER and GH_TOKEN required for push. Set in .env."; exit 1)
@@ -54,6 +56,8 @@ nerdctl-push:
 
 sudo-build:
 	sudo nerdctl build -f docker/dockerfiles/Dockerfile.core $(COMPOSED_BUILD_ARGS) -t ${IMAGE_NAME}:${IMAGE_TAG} .
+	@mkdir -p target/release
+	sudo nerdctl build -f docker/dockerfiles/Dockerfile.core $(COMPOSED_BUILD_ARGS) --target export --output type=local,dest=target/release .
 
 sudo-push:
 	@test -n "$(GH_OWNER)" || (echo "GH_OWNER and GH_TOKEN required for push. Set in .env."; exit 1)

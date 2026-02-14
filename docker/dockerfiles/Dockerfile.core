@@ -62,3 +62,10 @@ RUN chmod 0755 /usr/local/bin/entrypoint
 ENV RUST_LOG=info
 ENTRYPOINT ["/usr/local/bin/entrypoint"]
 CMD ["--socket", "/tmp/vapp-core.sock", "--app-dir", "/root/.vapp"]
+
+# -----------------------------------------------------------------------------
+# Stage 3: export (BuildKit --output extracts binary to host filesystem)
+# Usage: nerdctl build --target export --output type=local,dest=target/release .
+# -----------------------------------------------------------------------------
+FROM scratch AS export
+COPY --from=builder /app/out/vapp-core-daemon /vapp-core-daemon
