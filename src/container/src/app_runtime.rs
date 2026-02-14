@@ -159,7 +159,7 @@ impl AppRuntime {
                 Some("spec".into()),
                 Some(app_id.clone()),
             );
-            write_oci_spec(&bundle_dir.join("config.json"), spec)?;
+            write_oci_spec(&bundle_dir.join("config.json"), spec, &image_dir)?;
 
             // Chown rootfs for user namespace (rootless containers)
             if !spec.privileged {
@@ -369,10 +369,48 @@ fn build_app_context(spec: &AppSpec) -> tera::Context {
     ctx
 }
 
+/// Read Entrypoint and Cmd from the OCI image config (image_config.json).
+/// Returns (entrypoint, cmd) where each is a Vec<String>.
+fn read_image_entrypoint_cmd(image_dir: &Path) -> (Vec<String>, Vec<String>) {
+    let config_path = image_dir.join("image_config.json");
+    let config_text = match std::fs::read_to_string(&config_path) {
+        Ok(t) => t,
+        Err(_) => return (vec![], vec![]),
+    };
+    let config: serde_json::Value = match serde_json::from_str(&config_text) {
+        Ok(v) => v,
+        Err(_) => return (vec![], vec![]),
+    };
+    // OCI image config: .config.Entrypoint and .config.Cmd
+    let container_config = config.get("config").or_else(|| config.get("container_config"));
+    let parse_str_array = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (entrypoint, cmd) = match container_config {
+        Some(cc) => (
+            cc.get("Entrypoint").map(|v| parse_str_array(v)).unwrap_or_default(),
+            cc.get("Cmd").map(|v| parse_str_array(v)).unwrap_or_default(),
+        ),
+        None => (vec![], vec![]),
+    };
+    tracing::debug!(
+        "[write_oci_spec] Image entrypoint={:?}, cmd={:?}",
+        entrypoint,
+        cmd
+    );
+    (entrypoint, cmd)
+}
+
 /// Write OCI config.json for an AppSpec.
 /// Based on existing write_oci_spec_for_run, enhanced with resource limits.
 #[cfg(target_os = "linux")]
-fn write_oci_spec(spec_path: &Path, spec: &AppSpec) -> Result<(), ProvisionError> {
+fn write_oci_spec(spec_path: &Path, spec: &AppSpec, image_dir: &Path) -> Result<(), ProvisionError> {
     use serde_json::json;
 
     let args: Vec<String> = spec
@@ -383,7 +421,17 @@ fn write_oci_spec(spec_path: &Path, spec: &AppSpec) -> Result<(), ProvisionError
         .chain(spec.args.clone().unwrap_or_default())
         .collect();
     let args: Vec<String> = if args.is_empty() {
-        vec!["/bin/sh".to_string()]
+        // No command/args in spec — use image's Entrypoint + Cmd
+        let (entrypoint, cmd) = read_image_entrypoint_cmd(image_dir);
+        if !entrypoint.is_empty() {
+            let mut combined = entrypoint;
+            combined.extend(cmd);
+            combined
+        } else if !cmd.is_empty() {
+            cmd
+        } else {
+            vec!["/bin/sh".to_string()]
+        }
     } else {
         args
     };
@@ -528,7 +576,7 @@ fn write_oci_spec(spec_path: &Path, spec: &AppSpec) -> Result<(), ProvisionError
 }
 
 #[cfg(not(target_os = "linux"))]
-fn write_oci_spec(_spec_path: &Path, _spec: &AppSpec) -> Result<(), ProvisionError> {
+fn write_oci_spec(_spec_path: &Path, _spec: &AppSpec, _image_dir: &Path) -> Result<(), ProvisionError> {
     Err(ProvisionError::Config(
         "OCI spec generation only on Linux".to_string(),
     ))

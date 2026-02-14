@@ -393,7 +393,60 @@ impl ImageManager {
             tracing::info!("[ImageManager] Fetched platform-specific manifest");
         }
 
-        // 2. Extract layer digests from manifest
+        // 2. Fetch OCI image config (contains Entrypoint/Cmd)
+        if let Some(config_descriptor) = manifest_json.get("config") {
+            if let Some(config_digest) = config_descriptor.get("digest").and_then(|d| d.as_str()) {
+                let config_url = format!(
+                    "{}/v2/{}/blobs/{}",
+                    docker_proxy_base, repository, config_digest
+                );
+                tracing::debug!(
+                    "[ImageManager] Fetching image config: {}",
+                    config_digest
+                );
+                match client.get(&config_url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        match resp.text().await {
+                            Ok(config_text) => {
+                                let config_path = image_dir.join("image_config.json");
+                                if let Err(e) = fs::write(&config_path, config_text.as_bytes()).await {
+                                    tracing::warn!(
+                                        "[ImageManager] Failed to save image config: {}",
+                                        e
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        "[ImageManager] Saved image config to {:?}",
+                                        config_path
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[ImageManager] Failed to read image config body: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    Ok(resp) => {
+                        tracing::warn!(
+                            "[ImageManager] Image config fetch returned {}: {}",
+                            resp.status(),
+                            config_digest
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "[ImageManager] Failed to fetch image config: {}",
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // 3. Extract layer digests from manifest
         let layers = manifest_json
             .get("layers")
             .and_then(|l| l.as_array())
