@@ -31,6 +31,7 @@ fn cmd_short_label(cmd: &VappCoreCommand) -> &'static str {
         VappCoreCommand::ListApps => "ListApps",
         VappCoreCommand::GetInterfaceIp { .. } => "GetInterfaceIp",
         VappCoreCommand::StartContainerGroup { .. } => "StartContainerGroup",
+        VappCoreCommand::RunDiagnostic => "RunDiagnostic",
     }
 }
 
@@ -70,6 +71,60 @@ fn get_interface_ip(interface: &str) -> Result<String, String> {
 #[cfg(not(target_os = "linux"))]
 fn get_interface_ip(_interface: &str) -> Result<String, String> {
     Err("GetInterfaceIp only supported on Linux".to_string())
+}
+
+/// Run diagnostic commands on the VM host and return results as a map.
+#[cfg(target_os = "linux")]
+async fn run_diagnostic() -> WireMessage {
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    let mut report = HashMap::new();
+
+    let commands: Vec<(&str, Vec<&str>)> = vec![
+        ("ip_link", vec!["ip", "link", "show"]),
+        ("ip_addr", vec!["ip", "addr", "show"]),
+        ("dev_net_tun", vec!["ls", "-la", "/dev/net/tun"]),
+        ("ps_zerotier", vec!["sh", "-c", "ps aux | grep -i zerotier | grep -v grep"]),
+        ("zt_pid_file", vec!["sh", "-c", "cat /var/lib/zerotier-one/zerotier-one.pid 2>&1 || echo 'not found'"]),
+        ("zt_status", vec!["sh", "-c", "zerotier-cli status 2>&1 || echo 'zerotier-cli not found or failed'"]),
+        ("zt_listnetworks", vec!["sh", "-c", "zerotier-cli listnetworks 2>&1 || echo 'failed'"]),
+        ("zt_listpeers", vec!["sh", "-c", "zerotier-cli listpeers 2>&1 | head -20 || echo 'failed'"]),
+        ("containers_running", vec!["sh", "-c", "ls /run/youki/ 2>/dev/null || echo 'no /run/youki'"]),
+        ("proc_namespaces", vec!["sh", "-c", "ls -la /proc/1/ns/ 2>&1"]),
+        ("kernel_tun", vec!["sh", "-c", "grep -i tun /proc/modules 2>/dev/null || echo 'not in modules (may be builtin)'"]),
+        ("dmesg_tun", vec!["sh", "-c", "dmesg 2>/dev/null | grep -i tun | tail -5 || echo 'no tun dmesg'"]),
+    ];
+
+    for (key, args) in commands {
+        let result = Command::new(args[0])
+            .args(&args[1..])
+            .output();
+        match result {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let combined = if stderr.is_empty() {
+                    stdout
+                } else {
+                    format!("{}\nSTDERR: {}", stdout, stderr)
+                };
+                report.insert(key.to_string(), combined);
+            }
+            Err(e) => {
+                report.insert(key.to_string(), format!("exec error: {}", e));
+            }
+        }
+    }
+
+    WireMessage::ok_diagnostic(report)
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn run_diagnostic() -> WireMessage {
+    let mut report = std::collections::HashMap::new();
+    report.insert("error".to_string(), "RunDiagnostic only supported on Linux".to_string());
+    WireMessage::ok_diagnostic(report)
 }
 
 /// Write one NDJSON line to an async writer.
@@ -243,7 +298,10 @@ where
             Ok(VappCoreCommand::GetInterfaceIp { interface }) => {
                 let msg = match get_interface_ip(&interface) {
                     Ok(ip) => WireMessage::ok_interface_ip(interface, Some(ip)),
-                    Err(_) => WireMessage::ok_interface_ip(interface, None),
+                    Err(e) => {
+                        debug!("GetInterfaceIp({}): {}", interface, e);
+                        WireMessage::ok_interface_ip(interface, None)
+                    }
                 };
                 if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
                     error!("Daemon: failed to send GetInterfaceIp response to {}: {}", peer, e);
@@ -397,6 +455,14 @@ where
                         "Daemon: failed to send group result to {}: {}",
                         peer, e
                     );
+                    break;
+                }
+            }
+            Ok(VappCoreCommand::RunDiagnostic) => {
+                info!("Daemon: running VM diagnostics for {}", peer);
+                let msg = run_diagnostic().await;
+                if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
+                    error!("Daemon: failed to send RunDiagnostic response to {}: {}", peer, e);
                     break;
                 }
             }

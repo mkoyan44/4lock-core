@@ -75,6 +75,9 @@ pub enum VappCoreCommand {
     StartContainerGroup {
         group: ContainerGroupSpec,
     },
+    /// Run diagnostic commands on the VM host and return results.
+    /// Used for debugging networking, container state, etc.
+    RunDiagnostic,
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +291,11 @@ impl WireMessage {
             data: ResponseData::ContainerGroup(result),
         }
     }
+    pub fn ok_diagnostic(report: std::collections::HashMap<String, String>) -> Self {
+        WireMessage::Ok {
+            data: ResponseData::Diagnostic(report),
+        }
+    }
     pub fn err(error: WireError) -> Self {
         WireMessage::Error(error)
     }
@@ -325,4 +333,5 @@ pub enum ResponseData {
         ip: Option<String>,
     },
     ContainerGroup(ContainerGroupResult),
+    Diagnostic(std::collections::HashMap<String, String>),
 }
