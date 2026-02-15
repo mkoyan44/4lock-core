@@ -35,11 +35,52 @@ fn cmd_short_label(cmd: &VappCoreCommand) -> &'static str {
     }
 }
 
-/// Get IP address of a network interface by parsing `ip addr show <interface>` output
+/// Get IP address of a network interface by parsing `ip addr show` output.
+/// Supports prefix matching: if `interface` ends with `*`, matches any interface
+/// starting with that prefix (e.g., "zt*" matches "ztrfyjzrge").
 #[cfg(target_os = "linux")]
 fn get_interface_ip(interface: &str) -> Result<String, String> {
     use std::process::Command;
 
+    // Check if this is a prefix query (e.g., "zt*")
+    if let Some(prefix) = interface.strip_suffix('*') {
+        // List all interfaces and find one matching the prefix
+        let output = Command::new("ip")
+            .args(["addr", "show"])
+            .output()
+            .map_err(|e| format!("Failed to run ip addr: {}", e))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut current_iface: Option<String> = None;
+
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            // Interface header line: "3: ztrfyjzrge: <FLAGS> ..."
+            if !trimmed.starts_with(' ') && trimmed.contains(": ") {
+                let parts: Vec<&str> = trimmed.splitn(3, ": ").collect();
+                if parts.len() >= 2 {
+                    let iface_name = parts[1].split('@').next().unwrap_or(parts[1]);
+                    if iface_name.starts_with(prefix) {
+                        current_iface = Some(iface_name.to_string());
+                    } else {
+                        current_iface = None;
+                    }
+                }
+            }
+            // IP line under a matching interface
+            if current_iface.is_some() && trimmed.starts_with("inet ") && !trimmed.contains("inet6") {
+                if let Some(ip_cidr) = trimmed.split_whitespace().nth(1) {
+                    let ip = ip_cidr.split('/').next().unwrap_or("");
+                    if !ip.is_empty() {
+                        return Ok(ip.to_string());
+                    }
+                }
+            }
+        }
+        return Err(format!("No interface matching prefix '{}' found", prefix));
+    }
+
+    // Exact interface name match
     let output = Command::new("ip")
         .args(["addr", "show", interface])
         .output()
