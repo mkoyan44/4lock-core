@@ -69,3 +69,18 @@ CMD ["--socket", "/tmp/vapp-core.sock", "--app-dir", "/root/.vapp"]
 # -----------------------------------------------------------------------------
 FROM scratch AS export
 COPY --from=builder /app/out/vapp-core-daemon /vapp-core-daemon
+
+# -----------------------------------------------------------------------------
+# Stage 4: export-iso (packages daemon binary into ISO for Hyper-V VM mounting)
+# Usage: nerdctl build --target export-iso --output type=local,dest=target/release .
+# -----------------------------------------------------------------------------
+FROM --platform=linux/${TARGET_ARCH} debian:bookworm-slim AS iso-builder
+RUN apt-get update && apt-get install -y --no-install-recommends genisoimage \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /iso
+COPY --from=builder /app/out/vapp-core-daemon /iso/vapp-core-daemon
+RUN chmod 0755 /iso/vapp-core-daemon \
+    && genisoimage -o /vappc-daemon.iso -R -J -V "VAPP_DAEMON" /iso/
+
+FROM scratch AS export-iso
+COPY --from=iso-builder /vappc-daemon.iso /vappc-daemon.iso
