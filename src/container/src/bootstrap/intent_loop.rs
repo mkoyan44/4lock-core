@@ -1,6 +1,7 @@
 /// Intent command loop for app runtime.
 ///
 /// Handles RuntimeIntent commands and routes them to AppRuntime.
+use crate::AppState;
 use crate::intent::RuntimeIntent;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
