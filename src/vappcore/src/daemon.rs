@@ -7,21 +7,29 @@
 //! For streaming commands (StartApp), the daemon sends zero or more `Progress` lines
 //! followed by exactly one terminal `Ok` or `Error` line.
 
-use crate::protocol::{ContainerGroupResult, VappCoreCommand, WireError, WireMessage};
 use container::intent::RuntimeIntent;
+use tokio::sync::mpsc;
+
+#[cfg(unix)]
+use crate::protocol::{ContainerGroupResult, VappCoreCommand, WireError, WireMessage};
+#[cfg(unix)]
 use container::progress::RuntimeStartProgress;
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[cfg(unix)]
 use tokio::net::UnixListener;
 #[cfg(target_os = "linux")]
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+#[cfg(unix)]
 use tokio::sync::oneshot;
+#[cfg(unix)]
 use tracing::{debug, error, info};
 
 /// Maximum time to wait for a StartApp provisioning to complete (10 minutes).
+#[cfg(unix)]
 const PROVISIONING_TIMEOUT_SECS: u64 = 600;
 
+#[cfg(unix)]
 fn cmd_short_label(cmd: &VappCoreCommand) -> &'static str {
     match cmd {
         VappCoreCommand::Ping => "Ping",
@@ -109,7 +117,7 @@ fn get_interface_ip(interface: &str) -> Result<String, String> {
     Err(format!("No IPv4 address found for interface {}", interface))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn get_interface_ip(_interface: &str) -> Result<String, String> {
     Err("GetInterfaceIp only supported on Linux".to_string())
 }
@@ -161,7 +169,7 @@ async fn run_diagnostic() -> WireMessage {
     WireMessage::ok_diagnostic(report)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 async fn run_diagnostic() -> WireMessage {
     let mut report = std::collections::HashMap::new();
     report.insert("error".to_string(), "RunDiagnostic only supported on Linux".to_string());
@@ -169,6 +177,7 @@ async fn run_diagnostic() -> WireMessage {
 }
 
 /// Write one NDJSON line to an async writer.
+#[cfg(unix)]
 async fn write_ndjson_async<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     msg: &WireMessage,
@@ -191,6 +200,7 @@ async fn write_ndjson_async<W: AsyncWriteExt + Unpin>(
 
 /// Handle multiple requests on the same connection (NDJSON: read line → parse → respond → write line).
 /// For StartApp: streams progress messages before the final response.
+#[cfg(unix)]
 async fn handle_client<S>(stream: S, peer: String, intent_tx: mpsc::Sender<RuntimeIntent>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
