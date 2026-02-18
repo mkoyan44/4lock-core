@@ -453,6 +453,24 @@ fn write_oci_spec(spec_path: &Path, spec: &AppSpec, image_dir: &Path) -> Result<
             "options": options
         }));
     }
+    // Standard OCI mounts required by most runtimes (Go needs /proc/self/mountinfo)
+    oci_mounts.push(json!({
+        "destination": "/proc",
+        "type": "proc",
+        "source": "proc"
+    }));
+    oci_mounts.push(json!({
+        "destination": "/dev",
+        "type": "tmpfs",
+        "source": "tmpfs",
+        "options": ["nosuid", "strictatime", "mode=755", "size=65536k"]
+    }));
+    oci_mounts.push(json!({
+        "destination": "/sys",
+        "type": "sysfs",
+        "source": "sysfs",
+        "options": ["nosuid", "noexec", "nodev", "ro"]
+    }));
     oci_mounts.push(json!({
         "destination": "/tmp",
         "type": "tmpfs",
