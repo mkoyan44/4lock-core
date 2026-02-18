@@ -483,6 +483,7 @@ fn write_oci_spec(spec_path: &Path, spec: &AppSpec, image_dir: &Path) -> Result<
         if spec.privileged && nix::unistd::Uid::current().as_raw() == 0 {
             (
                 vec![
+                    json!({"type": "pid"}),
                     json!({"type": "ipc"}),
                     json!({"type": "uts"}),
                     json!({"type": "mount"}),
@@ -510,6 +511,7 @@ fn write_oci_spec(spec_path: &Path, spec: &AppSpec, image_dir: &Path) -> Result<
             (
                 vec![
                     json!({"type": "user"}),
+                    json!({"type": "pid"}),
                     json!({"type": "ipc"}),
                     json!({"type": "uts"}),
                     json!({"type": "mount"}),
