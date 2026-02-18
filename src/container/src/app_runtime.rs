@@ -166,29 +166,12 @@ impl AppRuntime {
                 chown_rootfs_to_uid0(&bundle_rootfs)?;
             }
 
-            // 4. Create + start container (35-45%)
-            progress.emit_detailed(
-                35,
-                "Creating container...".to_string(),
-                Some("container".into()),
-                Some(app_id.clone()),
-            );
-            lifecycle::create_container(&container_id, &bundle_dir, &self.app_dir)
-                .map_err(|e| ProvisionError::Runtime(e.to_string()))?;
-
-            progress.emit_detailed(
-                40,
-                "Starting container...".to_string(),
-                Some("container".into()),
-                Some(app_id.clone()),
-            );
-            lifecycle::start_container(&self.app_dir, &container_id)
-                .map_err(|e| ProvisionError::Runtime(e.to_string()))?;
-
-            // 5. Render config templates into container (45-55%)
+            // 4. Render config templates into bundle rootfs BEFORE container start.
+            // Critical for scratch-based images (e.g., CoreDNS) that read config at
+            // process startup and have no shell for post-start injection.
             if !spec.config_templates.is_empty() {
                 progress.emit_detailed(
-                    45,
+                    32,
                     "Rendering config templates...".to_string(),
                     Some("templates".into()),
                     Some(app_id.clone()),
@@ -206,17 +189,6 @@ impl AppRuntime {
                             ))
                         })?;
 
-                    // Write rendered content into container via exec
-                    let write_cmd = vec![
-                        "sh".to_string(),
-                        "-c".to_string(),
-                        format!(
-                            "mkdir -p \"$(dirname '{}')\" && cat > '{}'",
-                            tmpl.destination, tmpl.destination
-                        ),
-                    ];
-                    // Use tee approach: pipe content via exec stdin
-                    // Fallback: write to bundle rootfs directly
                     let rootfs_dest = bundle_rootfs.join(
                         tmpl.destination.strip_prefix('/').unwrap_or(&tmpl.destination),
                     );
@@ -226,14 +198,31 @@ impl AppRuntime {
                     std::fs::write(&rootfs_dest, &rendered).map_err(ProvisionError::Io)?;
 
                     tracing::info!(
-                        "[AppRuntime] Rendered template '{}' → '{}'",
+                        "[AppRuntime] Rendered template '{}' → '{}' (pre-start)",
                         tmpl.template,
                         tmpl.destination
                     );
-
-                    let _ = write_cmd; // exec approach can be added later if rootfs write doesn't work
                 }
             }
+
+            // 5. Create + start container (35-45%)
+            progress.emit_detailed(
+                35,
+                "Creating container...".to_string(),
+                Some("container".into()),
+                Some(app_id.clone()),
+            );
+            lifecycle::create_container(&container_id, &bundle_dir, &self.app_dir)
+                .map_err(|e| ProvisionError::Runtime(e.to_string()))?;
+
+            progress.emit_detailed(
+                40,
+                "Starting container...".to_string(),
+                Some("container".into()),
+                Some(app_id.clone()),
+            );
+            lifecycle::start_container(&self.app_dir, &container_id)
+                .map_err(|e| ProvisionError::Runtime(e.to_string()))?;
 
             // 6. Run setup tasks (55-90%)
             if !spec.setup_tasks.is_empty() {

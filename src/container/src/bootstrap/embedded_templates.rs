@@ -9,5 +9,5 @@
 /// All embedded templates as (name, content) pairs for registration with Tera.
 /// App templates will be added as needed.
 pub const ALL_TEMPLATES: &[(&str, &str)] = &[
-    // Example: ("app/nginx.conf.j2", include_str!("templates/app/nginx.conf.j2")),
+    ("app/coredns-corefile.j2", include_str!("templates/app/coredns-corefile.j2")),
 ];
