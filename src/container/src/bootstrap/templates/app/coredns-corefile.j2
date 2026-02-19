@@ -1,8 +1,12 @@
 {{ dns_internal_zone }}:53 {
+    hosts /etc/coredns/hosts {{ dns_internal_zone }} {
+        reload 5s
+        fallthrough
+    }
+    forward . {{ dns_internal_upstream }}
     log
     errors
     cache 30
-    forward . {{ dns_internal_upstream }}
 }
 
 .:53 {

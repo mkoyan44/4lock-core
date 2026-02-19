@@ -40,6 +40,7 @@ fn cmd_short_label(cmd: &VappCoreCommand) -> &'static str {
         VappCoreCommand::GetInterfaceIp { .. } => "GetInterfaceIp",
         VappCoreCommand::StartContainerGroup { .. } => "StartContainerGroup",
         VappCoreCommand::RunDiagnostic => "RunDiagnostic",
+        VappCoreCommand::UpdateDnsRecords { .. } => "UpdateDnsRecords",
     }
 }
 
@@ -174,6 +175,34 @@ async fn run_diagnostic() -> WireMessage {
     let mut report = std::collections::HashMap::new();
     report.insert("error".to_string(), "RunDiagnostic only supported on Linux".to_string());
     WireMessage::ok_diagnostic(report)
+}
+
+/// Write DNS records to a hosts file that CoreDNS watches and auto-reloads.
+/// Uses atomic write (temp file + rename) to avoid partial reads.
+#[cfg(unix)]
+fn write_dns_hosts_file(records: &[crate::protocol::DnsRecord]) -> Result<usize, String> {
+    use std::path::Path;
+
+    let dns_dir = Path::new("/var/lib/vapp/dns");
+    std::fs::create_dir_all(dns_dir).map_err(|e| format!("create_dir_all: {}", e))?;
+
+    let mut content = String::from("# Managed by 4lock-agent — do not edit manually\n");
+    for r in records {
+        content.push_str(&format!("{} {}\n", r.ip, r.hostname));
+    }
+
+    // Atomic write: temp file + rename
+    let tmp_path = dns_dir.join("hosts.tmp");
+    let final_path = dns_dir.join("hosts");
+    std::fs::write(&tmp_path, &content).map_err(|e| format!("write: {}", e))?;
+    std::fs::rename(&tmp_path, &final_path).map_err(|e| format!("rename: {}", e))?;
+
+    info!(
+        "[DNS] Wrote {} records to {}",
+        records.len(),
+        final_path.display()
+    );
+    Ok(records.len())
 }
 
 /// Write one NDJSON line to an async writer.
@@ -514,6 +543,16 @@ where
                 let msg = run_diagnostic().await;
                 if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
                     error!("Daemon: failed to send RunDiagnostic response to {}: {}", peer, e);
+                    break;
+                }
+            }
+            Ok(VappCoreCommand::UpdateDnsRecords { records }) => {
+                let msg = match write_dns_hosts_file(&records) {
+                    Ok(count) => WireMessage::ok_dns_records_updated(count),
+                    Err(e) => WireMessage::err_string(format!("DNS update failed: {}", e)),
+                };
+                if let Err(e) = write_ndjson_async(&mut writer_half, &msg).await {
+                    error!("Daemon: failed to send UpdateDnsRecords response to {}: {}", peer, e);
                     break;
                 }
             }

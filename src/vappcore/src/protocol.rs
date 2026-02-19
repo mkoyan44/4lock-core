@@ -43,6 +43,18 @@ pub struct ContainerGroupResult {
 }
 
 // ---------------------------------------------------------------------------
+// DNS record types
+// ---------------------------------------------------------------------------
+
+/// A DNS record mapping an IP address to a hostname.
+/// Used by the `UpdateDnsRecords` command to write a hosts file for CoreDNS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsRecord {
+    pub ip: String,
+    pub hostname: String,
+}
+
+// ---------------------------------------------------------------------------
 // Commands (client → daemon)
 // ---------------------------------------------------------------------------
 
@@ -78,6 +90,11 @@ pub enum VappCoreCommand {
     /// Run diagnostic commands on the VM host and return results.
     /// Used for debugging networking, container state, etc.
     RunDiagnostic,
+    /// Update DNS records — writes a hosts file that CoreDNS watches and auto-reloads.
+    /// Records are written atomically to `/var/lib/vapp/dns/hosts`.
+    UpdateDnsRecords {
+        records: Vec<DnsRecord>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +313,11 @@ impl WireMessage {
             data: ResponseData::Diagnostic(report),
         }
     }
+    pub fn ok_dns_records_updated(count: usize) -> Self {
+        WireMessage::Ok {
+            data: ResponseData::DnsRecordsUpdated { count },
+        }
+    }
     pub fn err(error: WireError) -> Self {
         WireMessage::Error(error)
     }
@@ -334,4 +356,7 @@ pub enum ResponseData {
     },
     ContainerGroup(ContainerGroupResult),
     Diagnostic(std::collections::HashMap<String, String>),
+    DnsRecordsUpdated {
+        count: usize,
+    },
 }
