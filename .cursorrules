@@ -46,7 +46,7 @@ When changes are necessary in these areas, propose the plan first and wait for c
 4lock-core is **Linux-only** for runtime (rootless OCI, CRI, vappcore daemon).
 
 ### Linux (Primary)
-- **Native build/run**: Cargo and run daemon binary directly. Requires Linux (namespaces, uidmap, pasta).
+- **Native build/run**: Cargo and run daemon binary directly. Requires Linux (namespaces, uidmap).
 - **Containerized build/run**: `make` (build then run), uses nerdctl + `docker/dockerfiles/Dockerfile.core`.
 - **TARGET_ARCH**: Auto-detected from host. Override in `.env`. Prefer native arch (cross-arch uses QEMU, can be slow/flaky).
 

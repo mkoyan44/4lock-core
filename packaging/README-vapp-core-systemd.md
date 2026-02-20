@@ -62,4 +62,4 @@ If the binary path var is omitted, the binary must already be present at `/usr/l
 
 ## Privileged vs rootless
 
-When the daemon runs as **root** (e.g. for testing), system requirements check is skipped and privileged containers can be used. When it runs as **vapp**, the daemon still runs the rootless-oriented check unless you run the Linux container setup script (subuid, subgid, passt) for rootless mode, or run the service as root for privileged mode.
+When the daemon runs as **root** (e.g. for testing), system requirements check is skipped and privileged containers can be used. When it runs as **vapp**, the daemon still runs the rootless-oriented check unless you run the Linux container setup script (subuid, subgid) for rootless mode, or run the service as root for privileged mode.

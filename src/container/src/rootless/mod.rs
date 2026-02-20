@@ -10,7 +10,6 @@ pub mod error;
 pub mod lifecycle;
 pub mod orchestration;
 pub mod runtime;
-pub mod shared_netns;
 pub mod system_check;
 
 // Re-exports for convenience
@@ -22,7 +21,3 @@ pub use orchestration::group::{
 };
 pub use orchestration::ContainerManager;
 pub use runtime::RootlessContainerRuntime;
-pub use shared_netns::{
-    cleanup_orphaned_pasta, cleanup_shared_namespace, get_shared_namespace_path,
-    initialize_shared_namespace,
-};

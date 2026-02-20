@@ -15,7 +15,7 @@
 - **Language**: Rust (async/tokio where used).
 - **Build/run**: Cargo on Linux; Makefile + nerdctl for containerized build/run (any host).
 - **Communication**: vappc protocol over Unix socket (`/tmp/vappc`) or VSOCK.
-- **Container**: Rootless OCI (youki/libcontainer-style), CRI (gRPC), pasta for networking.
+- **Container**: Rootless OCI (youki/libcontainer-style), CRI (gRPC), host networking.
 
 ## Layout (High-Level)
 

@@ -33,7 +33,7 @@ This document describes the internal layout of each crate in the 4lock-core work
 
 ### Notable modules
 
-- **rootless/** – OCI runtime (lifecycle, bundle, orchestration, shared netns, system_check). Rootless-only; uses pasta for networking where applicable.
+- **rootless/** – OCI runtime (lifecycle, bundle, orchestration, system_check). Host networking; no per-container network namespace.
 - **cri/** – CRI gRPC server: runtime_service, image_service, sandbox, container_registry.
 - **bootstrap/** – Intent loop, provisioner, image_manager, workflow, templates (Jinja2), tasks (container_task, kubectl_task), certs, volume_manager.
 - **common/** – Shared types, image, volume.

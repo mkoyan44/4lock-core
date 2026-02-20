@@ -123,25 +123,26 @@ fn main() {
     let result: anyhow::Result<()> = rt.block_on(async {
         let (intent_tx, intent_rx) = mpsc::channel(32);
 
-        // Ensure docker-proxy.internal resolves to the correct host.
-        // On Linux (same host as agent): 127.0.0.1
-        // On VM (macOS/Windows guest): default gateway IP (host runs blob on 0.0.0.0:5050)
-        {
-            let target_ip = detect_gateway_ip().unwrap_or_else(|| "127.0.0.1".to_string());
-            if let Err(e) = add_hosts_entry(&target_ip, "docker-proxy.internal") {
-                tracing::warn!("Failed to add docker-proxy.internal to /etc/hosts: {}", e);
-                eprintln!("  WARNING: Could not add docker-proxy.internal -> {} to /etc/hosts: {}", target_ip, e);
-            } else {
-                eprintln!("  DNS: docker-proxy.internal -> {}", target_ip);
-            }
-        }
+        // Resolve blob server address from socket type — no env var needed.
+        // Unix socket = Linux host (blob on localhost), VSOCK = VM (blob on gateway).
+        const PROXY_PORT: u16 = 5050;
+        let proxy_host = if args.socket.starts_with("vsock:") {
+            let gw = detect_gateway_ip().unwrap_or_else(|| "127.0.0.1".to_string());
+            eprintln!("  Blob (docker-proxy): VM mode, gateway {}", gw);
+            gw
+        } else {
+            eprintln!("  Blob (docker-proxy): localhost (host mode)");
+            "127.0.0.1".to_string()
+        };
+        // Publish for downstream code (image_manager reads these env vars)
+        std::env::set_var("DOCKER_PROXY_HOST", &proxy_host);
+        std::env::set_var("DOCKER_PROXY_PORT", PROXY_PORT.to_string());
 
         // Wait for the host-level blob (docker-proxy) server started by 4lock-agent.
         // The agent starts blob on the host before booting VMs; this daemon just
         // needs to confirm it is reachable before accepting image-pull commands.
-        // docker-proxy.internal resolves to the gateway IP (VM) or 127.0.0.1 (Linux).
         {
-            let proxy_url = "http://docker-proxy.internal:5050/health";
+            let proxy_url = format!("http://{}:{}/health", proxy_host, PROXY_PORT);
             eprintln!("  Blob (docker-proxy): waiting for host server at {}", proxy_url);
 
             const BLOB_READY_TIMEOUT_MS: u64 = 30_000;
@@ -155,7 +156,7 @@ fn main() {
 
             let mut ready = false;
             while tokio::time::Instant::now() < deadline {
-                if client.get(proxy_url).send().await.map(|r| r.status().is_success()).unwrap_or(false) {
+                if client.get(&proxy_url).send().await.map(|r| r.status().is_success()).unwrap_or(false) {
                     info!("Blob (docker-proxy) host server ready at {}", proxy_url);
                     eprintln!("  Blob (docker-proxy): host server ready");
                     ready = true;
@@ -245,27 +246,4 @@ fn main() {
         None
     }
 
-    /// Add a hostname entry to /etc/hosts if not already present.
-    fn add_hosts_entry(ip: &str, hostname: &str) -> std::io::Result<()> {
-        let contents = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
-        // Check if already present
-        for line in contents.lines() {
-            let line = line.trim();
-            if line.starts_with('#') || line.is_empty() {
-                continue;
-            }
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 && parts[1..].contains(&hostname) {
-                // Already present
-                return Ok(());
-            }
-        }
-        // Append entry
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open("/etc/hosts")?;
-        writeln!(file, "{}\t{}", ip, hostname)?;
-        Ok(())
-    }
 }

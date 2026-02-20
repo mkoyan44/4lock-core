@@ -29,7 +29,7 @@ struct RunningApp {
 }
 
 impl AppRuntime {
-    /// Initialize: system check, shared network namespace, runtime, image manager, template renderer.
+    /// Initialize: system check, runtime, image manager, template renderer.
     pub fn new(app_dir: PathBuf) -> Result<Self, String> {
         tracing::info!("[AppRuntime] Initializing...");
         tracing::info!("[AppRuntime] App directory: {}", app_dir.display());
@@ -50,15 +50,6 @@ impl AppRuntime {
                     return Err("System requirements not met for rootless containers".to_string());
                 }
             }
-
-            // Clean up orphaned pasta processes
-            crate::rootless::cleanup_orphaned_pasta();
-
-            // Initialize shared network namespace (pasta for internet)
-            let ns_path = crate::rootless::initialize_shared_namespace().map_err(|e| {
-                format!("Failed to initialize shared network namespace: {}", e)
-            })?;
-            tracing::info!("[AppRuntime] Shared network namespace: {}", ns_path);
 
             // Load config (for image settings)
             let config =

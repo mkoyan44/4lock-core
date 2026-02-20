@@ -106,7 +106,7 @@ GH_TOKEN=<github-token>  # Required for push
 ## Important Notes
 
 - Linux-only runtime; containerized build/run via Makefile on macOS/Windows
-- `--privileged` required for `make run` (rootless containers, pasta networking)
+- `--privileged` required for `make run` (rootless containers, user namespaces)
 - Socket default: `/tmp/vapp-core.sock` (container) or `/run/vapp/vapp-core.sock` (systemd)
 - Consumed by 4lock-agent as path/git dependency (vappcore client crate)
 - Image: `ghcr.io/<GH_OWNER>/4lock-core-<arch>` or `4lock-core:latest` (local)

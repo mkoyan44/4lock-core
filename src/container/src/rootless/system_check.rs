@@ -4,7 +4,7 @@
 //! It checks:
 //! - AppArmor user namespace restrictions
 //! - subuid/subgid mappings
-//! - Required binaries (newuidmap, newgidmap, pasta)
+//! - Required binaries (newuidmap, newgidmap)
 
 use std::fs;
 use std::path::Path;
@@ -76,16 +76,13 @@ pub fn check_system_requirements() -> SystemCheckResult {
     let is_root = unsafe { libc::getuid() } == 0;
 
     let checks = if is_root {
-        // Root mode: only check for pasta (network namespace tool)
-        vec![
-            CheckItem {
-                name: "Running as root".to_string(),
-                passed: true,
-                message: "Privileged container mode enabled".to_string(),
-                fix_command: None,
-            },
-            check_binary("pasta", "pasta", false),
-        ]
+        // Root mode: privileged containers, no additional checks needed
+        vec![CheckItem {
+            name: "Running as root".to_string(),
+            passed: true,
+            message: "Privileged container mode enabled".to_string(),
+            fix_command: None,
+        }]
     } else {
         // Rootless mode: full checks
         vec![
@@ -96,7 +93,6 @@ pub fn check_system_requirements() -> SystemCheckResult {
             // Check required binaries
             check_binary("newuidmap", "/usr/bin/newuidmap", true),
             check_binary("newgidmap", "/usr/bin/newgidmap", true),
-            check_binary("pasta", "pasta", false),
             // NOTE: Host containerd is no longer required - kubelet uses vapp CRI server
         ]
     };
@@ -281,7 +277,7 @@ fn check_binary(name: &str, path_or_cmd: &str, check_setuid: bool) -> CheckItem 
             message: "Not installed".to_string(),
             fix_command: Some(format!(
                 "sudo apt install {}",
-                if name == "pasta" { "passt" } else { "uidmap" }
+                "uidmap"
             )),
         },
     }

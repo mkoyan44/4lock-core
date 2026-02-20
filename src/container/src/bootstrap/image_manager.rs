@@ -34,9 +34,9 @@ impl ImageManager {
 
     /// Resolve the docker-proxy base URL.
     ///
-    /// The agent's blob server always runs on port 5050:
-    /// - VM: reachable via `docker-proxy.internal` (gateway IP, resolved by bootstrap DNS)
-    /// - Linux: reachable via `127.0.0.1` (same host)
+    /// The daemon auto-detects the blob server at startup and sets
+    /// DOCKER_PROXY_HOST/DOCKER_PROXY_PORT env vars internally.
+    /// Defaults: 127.0.0.1:5050.
     fn detect_docker_proxy_url(&self) -> String {
         // Return cached URL if available
         {
@@ -46,7 +46,11 @@ impl ImageManager {
             }
         }
 
-        let url = "http://docker-proxy.internal:5050".to_string();
+        let host = std::env::var("DOCKER_PROXY_HOST")
+            .unwrap_or_else(|_| "127.0.0.1".to_string());
+        let port = std::env::var("DOCKER_PROXY_PORT")
+            .unwrap_or_else(|_| "5050".to_string());
+        let url = format!("http://{}:{}", host, port);
         tracing::info!("[ImageManager] Docker-proxy URL: {}", url);
         *self.docker_proxy_url.lock().unwrap() = Some(url.clone());
         url

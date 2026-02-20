@@ -1,7 +1,7 @@
 # 4lock-core: build and run on Linux only (via nerdctl).
 # Build: make build
 # Run:   make run  (or nerdctl run --rm -it --privileged -v /tmp/vapp-core:/tmp <image>)
-#        --privileged required for network/user namespaces (pasta, rootless containers).
+#        --privileged required for user namespaces (rootless containers).
 
 ARG TARGET_ARCH
 ARG BUILD_PROFILE=release
@@ -45,13 +45,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # -----------------------------------------------------------------------------
 FROM --platform=linux/${TARGET_ARCH} debian:bookworm-slim
 
-# Runtime: pasta is required by daemon system check when running as root
+# Runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    passt \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Daemon runs as root inside container (system_check accepts root + pasta)
+# Daemon runs as root inside container (privileged container mode)
 RUN mkdir -p /root/.vapp
 
 COPY --from=builder /app/out/vapp-core-daemon /usr/local/bin/vapp-core-daemon

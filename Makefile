@@ -78,7 +78,7 @@ RUN_NAME := 4lock-core-run
 
 # Run the built image. Detached + logs -f so Ctrl+C stops the container and exits.
 # nerdctl does not allow -d and --rm together; we remove the container explicitly after stop.
-# --privileged required for network/user namespaces (pasta, rootless containers).
+# --privileged required for user namespaces (rootless containers).
 run:
 	@-nerdctl rm -f $(RUN_NAME) 2>/dev/null || true
 	nerdctl run -d --name $(RUN_NAME) --privileged -v /tmp/vapp-core:/tmp ${IMAGE_NAME}:${IMAGE_TAG}

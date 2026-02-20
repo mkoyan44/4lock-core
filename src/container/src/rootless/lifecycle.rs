@@ -1,16 +1,11 @@
 //! Container lifecycle operations (create, start, stop, delete)
 //!
-//! All containers join a shared network namespace for localhost communication.
-//! Internet connectivity is provided by pasta (from the passt package).
+//! Containers use host networking (no per-container network namespace).
 
 use super::error::ContainerError;
 use serde_json;
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
-
-// Re-export cleanup function from shared_netns module
-#[cfg(target_os = "linux")]
-pub use super::shared_netns::cleanup_orphaned_pasta as cleanup_orphaned_slirp4netns;
 
 /// Options for creating a container
 #[derive(Default, Clone)]
@@ -1257,9 +1252,7 @@ pub fn create_container_with_options(
             container_id
         );
 
-        // Networking is handled via shared network namespace.
-        // All containers join the shared namespace with pasta providing internet connectivity.
-        // No per-container networking setup needed - containers communicate via localhost.
+        // Containers use host networking. No per-container networking setup needed.
 
         Ok(())
     }
@@ -1456,9 +1449,7 @@ pub fn start_container(root_path: &Path, container_id: &str) -> Result<(), Conta
             container_id
         );
 
-        // NOTE: Networking is handled by the shared network namespace
-        // All containers join the shared namespace and communicate via localhost
-        // The loopback interface setup is handled by startContainer OCI hook
+        // Containers use host networking. No per-container networking setup needed.
 
         Ok(())
     }
@@ -1518,8 +1509,7 @@ pub fn stop_container(root_path: &Path, container_id: &str) -> Result<(), Contai
         .ok_or_else(|| ContainerError::Other("Missing or invalid PID in state file".to_string()))?
         as i32;
 
-    // NOTE: With shared network namespace, there's no per-container networking to clean up.
-    // The shared namespace and its pasta process are managed by the provisioner.
+    // Containers use host networking. No per-container networking to clean up.
 
     // Try graceful shutdown with SIGTERM
     match kill(Pid::from_raw(pid), Signal::SIGTERM) {
